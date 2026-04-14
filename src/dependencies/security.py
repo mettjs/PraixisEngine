@@ -21,7 +21,7 @@ def verify_api_key(api_key: str = Security(_api_key_header)) -> str:
     app_name = redis_client.get(f"apikey:{api_key}")
     
     if not app_name:
-        logger.warning(f"Invalid API Key attempted: {api_key}")
+        logger.warning("Invalid API Key attempted.")
         raise HTTPException(status_code=403, detail="Invalid or revoked API Key.")
     
     logger.info(f"API Key authenticated for app: {app_name}")

@@ -97,16 +97,16 @@ async def handle_rag_upload(collection_name: str, file: UploadFile, app_name: st
             logger.warning(f"Could not extract any text from the provided file: {file.filename} for app: {app_name}")
             raise ValueError("File is empty or unreadable.")
             
-        collection_id = add_file_to_rag_db(
-            text=document_text, 
-            collection_name=collection_name, 
-            filename=file.filename, 
+        result_collection = add_file_to_rag_db(
+            text=document_text,
+            collection_name=collection_name,
+            filename=file.filename,
             app_name=app_name)
-        logger.info(f"Uploaded file: {file.filename} to collection: {collection_id} for app: {app_name}")
+        logger.info(f"Uploaded file: {file.filename} to collection: {result_collection} for app: {app_name}")
         return {
             "status": "success",
             "message": "Document indexed successfully.",
-            "collection_name": collection_id 
+            "collection_name": result_collection
         }
     except HTTPException:
         raise

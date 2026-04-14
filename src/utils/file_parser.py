@@ -20,7 +20,10 @@ def extract_text_from_file(filename: str, file_content: bytes) -> str:
             text += para.text + "\n"
             
     elif filename_lower.endswith(".txt"):
-        text = file_content.decode("utf-8")
+        try:
+            text = file_content.decode("utf-8")
+        except UnicodeDecodeError:
+            text = file_content.decode("latin-1")
         
     else:
         raise ValueError("Unsupported file format. Please upload a PDF, DOCX, or TXT file.")

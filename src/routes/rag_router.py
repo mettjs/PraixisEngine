@@ -44,16 +44,12 @@ def rag_ask_endpoint(
     return handle_rag_question(question_request, app_name=app_name)
 
 @router.get("/list")
-def rag_list_endpoint(    
-    request: Request,
-    app_name: str = Depends(verify_api_key)
-    ):
+def rag_list_endpoint(app_name: str = Depends(verify_api_key)):
     """See exactly what collections are currently on the server."""
     return handle_list_collections(app_name=app_name)
 
 @router.get("/{collection_name}/files")
 def list_files_endpoint(
-    request: Request,
     collection_name: str = Path(
         ..., 
         pattern=r"^[a-zA-Z0-9_-]{3,63}$",
@@ -65,7 +61,7 @@ def list_files_endpoint(
     return handle_list_files(collection_name=collection_name, app_name=app_name)
 
 @router.delete("/delete/{collection_name}")
-@limiter.limit("20/minute") # Protects the GPU: Max 60 delete requests per minute per user
+@limiter.limit("20/minute") # Protects the GPU: Max 20 delete requests per minute per user
 def rag_delete_endpoint(
     request: Request,
     collection_name: str,
@@ -75,7 +71,7 @@ def rag_delete_endpoint(
     return handle_delete_collection(collection_name=collection_name, app_name=app_name)
 
 @router.delete("/{collection_name}/files/{filename}")
-@limiter.limit("20/minute") # Protects the GPU: Max 60 delete requests per minute per user
+@limiter.limit("20/minute") # Protects the GPU: Max 20 delete requests per minute per user
 def delete_file_endpoint(
     request: Request,
     filename: str = Path(

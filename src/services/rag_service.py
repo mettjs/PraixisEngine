@@ -31,7 +31,7 @@ def generate_rag_answer(
     system_prompt: str | None = None,
     session_id: str | None = None
 ) -> Generator[str, None, None]:
-    """Generates an answer to a question based only on the context provided by the collction."""
+    """Generates an answer to a question based only on the context provided by the collection."""
     if not system_prompt:
         system_prompt = (
             "You are an expert institutional analyst. "
