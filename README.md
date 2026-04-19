@@ -6,13 +6,17 @@ A multi-tenant AI backend API that provides decoupled business logic for LLM-pow
 
 ## Features
 
-- **Stateful Chat** — Persistent, session-based conversations stored in Redis with configurable TTL
-- **RAG (Retrieval-Augmented Generation)** — Upload documents into named vector collections and ask grounded questions with source attribution
-- **File Processing** — Summarize or run custom tasks on uploaded PDFs, DOCX, and TXT files using a map-reduce pipeline for large documents
+- **Stateful Chat** — Persistent, session-based conversations stored in Redis with configurable TTL and automatic context-window trimming
+- **RAG (Retrieval-Augmented Generation)** — Upload documents into named vector collections (single or batch) and ask grounded questions with source attribution; supports metadata filters and custom chunk sizes
+- **File Processing** — Summarize or run custom tasks on uploaded PDFs, DOCX, and TXT files using a map-reduce pipeline with real-time streaming progress events
 - **Multi-tenancy** — API key authentication with full data isolation between apps; each app only sees its own sessions and collections
-- **Admin Panel** — HTTP Basic Auth-protected endpoints for provisioning/revoking API keys and monitoring system health
-- **Rate Limiting** — Per-IP, per-endpoint request limits to protect GPU resources
-- **GPU Concurrency Control** — Bounded semaphore limits simultaneous LLM calls; returns `503` immediately when at capacity rather than queueing threads
+- **Admin Panel** — HTTP Basic Auth-protected endpoints for provisioning/revoking API keys, listing all keys, wiping app sessions, and per-app token usage stats
+- **Rate Limiting** — Per-API-key, per-endpoint request limits to protect GPU resources (falls back to IP for unauthenticated routes)
+- **GPU Concurrency Control** — Async semaphore limits simultaneous LLM calls; returns `503` immediately when at capacity rather than queuing
+- **Usage Tracking** — Per-app prompt/completion token counters in Redis, exposed via admin endpoints
+- **Async I/O** — Fully async stack: `redis.asyncio`, `AsyncOpenAI`, ChromaDB calls offloaded via `asyncio.to_thread`
+- **Structured Output** — Optional `response_format: "json"` field on chat requests for machine-readable responses
+- **Embeddings** — Direct embedding endpoint returns the raw vector for any text input
 
 ---
 
@@ -148,6 +152,7 @@ REDIS_URL=redis://localhost:6379/0   # Use rediss:// for TLS (e.g., Upstash)
 
 # Session
 SESSION_TTL=86400                    # Session expiry in seconds (default: 24 hours)
+MAX_HISTORY_PAIRS=20                 # Max user+assistant turns kept per session before oldest are trimmed
 
 # ChromaDB
 # CHROMA_PATH=./chroma_data          # Override the default ChromaDB storage path
@@ -230,12 +235,28 @@ Returns `413 Request Entity Too Large` if the file exceeds 20 MB.
 
 ### RAG Upload — `POST /rag-db/upload`
 
+Accepts one or more files in a single request. Re-uploading a file that already exists in the collection replaces it automatically.
+
 | Field | Default | Description |
 |---|---|---|
-| `file` | required | `.pdf`, `.docx`, or `.txt` — max **20 MB** |
+| `files` | required | One or more `.pdf`, `.docx`, or `.txt` files — max **20 MB** each |
 | `collection_name` | `main` | Target collection (alphanumeric/dash/underscore, 3–63 chars) |
+| `chunk_size` | `1000` | Characters per chunk (100–4000) |
+| `chunk_overlap` | `150` | Overlap characters between chunks (0–500) |
 
-Re-uploading a file that already exists in the collection replaces it automatically (old chunks are deleted before new ones are inserted). Returns `413` if the file exceeds 20 MB.
+Returns per-file results:
+
+```json
+{
+  "collection_name": "company-policies",
+  "processed": 2,
+  "succeeded": 2,
+  "results": [
+    {"filename": "policy_a.pdf", "status": "success"},
+    {"filename": "policy_b.pdf", "status": "success"}
+  ]
+}
+```
 
 ---
 
@@ -270,6 +291,18 @@ Save the `SESSION_ID` to continue the conversation and benefit from automatic qu
 
 ---
 
+### Embed — `POST /rag-db/embed`
+
+Returns the raw embedding vector for a text input using the same model the RAG pipeline uses internally (384 dimensions). Useful for client-side similarity search, semantic caching, routing logic, or storing vectors in an external DB that must stay consistent with ChromaDB. Does **not** call the LLM — pure CPU operation, hence the higher rate limit (60/min).
+
+```json
+{ "text": "What is the refund policy?" }
+```
+
+Response: `{"text": "...", "dimensions": 384, "embedding": [0.023, -0.147, ...]}`
+
+---
+
 ### Other RAG Endpoints
 
 | Method | Path | Description |
@@ -287,10 +320,14 @@ Save the `SESSION_ID` to continue the conversation and benefit from automatic qu
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/system/health` | Check Redis and ChromaDB status |
+| `GET` | `/api/system/health` | Check Redis, ChromaDB, and LLM backend status |
 | `GET` | `/api/system/stats` | Active sessions, collection count, total vector chunks |
+| `GET` | `/api/system/keys` | List all provisioned API keys (masked) and their app names |
 | `POST` | `/api/system/keys/generate?app_name=` | Generate a new API key |
 | `DELETE` | `/api/system/keys/revoke?api_key=` | Permanently revoke an API key |
+| `DELETE` | `/api/system/sessions/{app_name}` | Force-wipe all active sessions for a specific app |
+| `GET` | `/api/system/usage` | Token usage totals across all apps |
+| `GET` | `/api/system/usage/{app_name}` | Token usage totals for a specific app |
 
 ---
 
