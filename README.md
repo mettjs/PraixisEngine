@@ -139,7 +139,9 @@ PraixisEngine/
         │   ├── logger.py
         │   └── limiter.py     # SlowAPI rate limiter
         └── documents/         # Document ingest + vector store
-            ├── file_parser.py # PDF / DOCX / TXT text extraction & chunking
+            ├── file_parser.py # PDF / DOCX / TXT text extraction
+            ├── embeddings.py  # fastembed text embedding singleton
+            ├── chunking.py    # Semantic and character chunking strategies
             └── vector_db.py   # ChromaDB CRUD operations
 ```
 
@@ -241,8 +243,9 @@ Accepts one or more files in a single request. Re-uploading a file that already 
 |---|---|---|
 | `files` | required | One or more `.pdf`, `.docx`, or `.txt` files — max **20 MB** each |
 | `collection_name` | `"main"` | Target collection (alphanumeric/dash/underscore, 3–63 chars) |
-| `chunk_size` | `1000` | Characters per chunk (100–4000) |
-| `chunk_overlap` | `150` | Overlap characters between chunks (0–500) |
+| `chunking_strategy` | `"semantic"` | `"semantic"` — splits at natural topic boundaries using embeddings; `"character"` — fixed-size recursive splits |
+| `chunk_size` | `2000` | Maximum characters per chunk (100–4000) |
+| `chunk_overlap` | `150` | Overlap characters between chunks (0–500). Only applies when `chunking_strategy` is `"character"` |
 
 Returns per-file results:
 
