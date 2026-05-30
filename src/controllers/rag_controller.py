@@ -71,10 +71,13 @@ async def handle_rag_upload(
     collection_name: str,
     files: List[UploadFile],
     app_name: str,
-    chunk_size: int = 1000,
+    chunk_size: int = 2000,
     chunk_overlap: int = 150,
+    chunking_strategy: str = "semantic",
 ) -> dict:
-    if chunk_overlap >= chunk_size:
+    if chunking_strategy not in ("semantic", "character"):
+        raise HTTPException(status_code=422, detail="chunking_strategy must be 'semantic' or 'character'.")
+    if chunking_strategy == "character" and chunk_overlap >= chunk_size:
         raise HTTPException(status_code=422, detail="chunk_overlap must be less than chunk_size.")
     results = []
     for file in files:
@@ -97,6 +100,7 @@ async def handle_rag_upload(
                 app_name=app_name,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                chunking_strategy=chunking_strategy,
             )
             logger.info(f"Batch uploaded file: {file.filename} to collection: {collection_name} for app: {app_name}")
             await log_event("FILE_UPLOADED", {"filename": file.filename, "collection": collection_name}, app_name=app_name)

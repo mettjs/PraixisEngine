@@ -45,17 +45,23 @@ router = APIRouter(
                             },
                             "chunk_size": {
                                 "type": "integer",
-                                "default": 1000,
+                                "default": 2000,
                                 "minimum": 100,
                                 "maximum": 4000,
-                                "description": "Characters per chunk (100–4000).",
+                                "description": "Maximum characters per semantic chunk (100–4000).",
                             },
                             "chunk_overlap": {
                                 "type": "integer",
                                 "default": 150,
                                 "minimum": 0,
                                 "maximum": 500,
-                                "description": "Overlap characters between chunks (0–500).",
+                                "description": "Overlap characters between chunks. Only applies when chunking_strategy is 'character'.",
+                            },
+                            "chunking_strategy": {
+                                "type": "string",
+                                "default": "semantic",
+                                "enum": ["semantic", "character"],
+                                "description": "Chunking strategy: 'semantic' cuts at topic shifts using embeddings; 'character' uses fixed-size splits.",
                             },
                         },
                     }
@@ -71,8 +77,9 @@ async def rag_upload_endpoint(
     files: List[UploadFile] = File(..., description="One or more .pdf, .docx, or .txt files — max 20 MB each."),
     collection_name: str = Form(default="main", pattern=r"^[a-zA-Z0-9_-]{3,63}$",
                                 description="Target collection name. Defaults to 'main'."),
-    chunk_size: int = Form(default=1000, ge=100, le=4000, description="Characters per chunk (100–4000)."),
-    chunk_overlap: int = Form(default=150, ge=0, le=500, description="Overlap characters between chunks (0–500)."),
+    chunk_size: int = Form(default=2000, ge=100, le=4000, description="Maximum characters per semantic chunk (100–4000)."),
+    chunk_overlap: int = Form(default=150, ge=0, le=500, description="Overlap characters between chunks. Only applies when chunking_strategy is 'character'."),
+    chunking_strategy: str = Form(default="semantic", description="Chunking strategy: 'semantic' or 'character'."),
     app_name: str = Depends(verify_api_key)
 ):
     return await handle_rag_upload(
@@ -81,6 +88,7 @@ async def rag_upload_endpoint(
         app_name=app_name,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        chunking_strategy=chunking_strategy,
     )
 
 

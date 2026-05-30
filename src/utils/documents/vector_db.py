@@ -2,12 +2,13 @@ import asyncio
 import chromadb
 import uuid
 from typing import List, Dict, Any, Set
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from chromadb.utils.embedding_functions import EmbeddingFunction
 from chromadb.api.types import Documents, Embeddings
 from fastembed import TextEmbedding
 
 from src.config import CHROMA_PATH as _CHROMA_PATH, EMBEDDING_MODEL as _EMBEDDING_MODEL
+from src.utils.documents.chunking import character_chunk, semantic_chunk
+
 chroma_client = chromadb.PersistentClient(path=_CHROMA_PATH)
 
 
@@ -105,9 +106,20 @@ async def add_file_to_rag_db(
     collection_name: str,
     filename: str,
     app_name: str,
-    chunk_size: int = 1000,
+    chunk_size: int = 2000,
     chunk_overlap: int = 150,
+    chunking_strategy: str = "semantic",
 ) -> str:
+    if chunking_strategy == "semantic":
+        chunks = await asyncio.to_thread(semantic_chunk, text, max_chunk_chars=chunk_size)
+    elif chunking_strategy == "character":
+        chunks = await asyncio.to_thread(character_chunk, text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    else:
+        raise ValueError("Invalid chunking strategy. Use 'semantic' or 'character'.")
+
+    if not chunks:
+        raise ValueError("Document produced no chunks; nothing to ingest.")
+
     def _run():
         collection = chroma_client.get_or_create_collection(
             name=_scoped_name(app_name, collection_name),
@@ -117,17 +129,9 @@ async def add_file_to_rag_db(
         if not collection.metadata or collection.metadata.get("app") != app_name:
             raise ValueError("Access denied: You do not own this collection.")
 
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=["\n\n", "\n", r"(?<=\. )", " ", ""],
-            is_separator_regex=True
-        )
-
         existing = collection.get(where={"source": filename}, include=["metadatas"])
         old_ids: List[str] = existing.get("ids", []) if existing else []
 
-        chunks = text_splitter.split_text(text)
         new_ids = [f"{filename}_{uuid.uuid4().hex[:6]}" for _ in chunks]
         metadatas: List[Dict[str, Any]] = [
             {"source": filename, "app": app_name, "chunk_index": i}

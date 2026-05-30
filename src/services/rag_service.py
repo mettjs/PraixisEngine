@@ -78,17 +78,25 @@ async def generate_rag_answer(
 
 
 async def reformulate_query(history: list, latest_question: str, app_name: str) -> str:
-    """Uses the chat history to rewrite vague follow-up questions into standalone queries."""
+    """Uses recent chat history to rewrite follow-up questions into standalone queries.
+
+    Returns the question unchanged when it introduces a new, independent topic so that
+    stale context from prior exchanges does not pollute an unrelated search query.
+    """
     if len(history) <= 1:
         return latest_question
 
     reformulation_prompt = (
-        "Given the following conversation history and the user's latest question, "
-        "rewrite the question to be a fully standalone search query. "
-        "Do not answer the question, ONLY return the rewritten query."
+        "You are a search query optimizer. Given a conversation history and the user's latest question, "
+        "decide whether the question is a follow-up that depends on the prior conversation "
+        "(e.g. it uses pronouns like 'it', 'them', 'this', 'that', or implicitly references something already discussed).\n\n"
+        "- If it IS a follow-up: rewrite it as a fully standalone search query by resolving those references.\n"
+        "- If it is a NEW, independent topic with no contextual dependency on the history: return the question EXACTLY as written.\n\n"
+        "Do NOT answer the question. Return ONLY the (possibly rewritten) query, nothing else."
     )
 
-    history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[1:]])
+    recent = history[1:][-6:]  # last 3 exchanges, skip system prompt
+    history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in recent])
     user_msg = f"History:\n{history_text}\n\nLatest Question: {latest_question}"
 
     content = await call_llm(
