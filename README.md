@@ -6,6 +6,31 @@ A multi-tenant AI backend API that provides decoupled business logic for LLM-pow
 
 ---
 
+## Client SDKs
+
+Official SDKs are available for connecting to PraixisEngine from your application:
+
+**Go**
+```bash
+go get github.com/mettjs/praixis-go
+```
+
+**Node.js**
+```bash
+npm install praixis
+```
+
+**Python**
+```bash
+# Synchronous client
+pip install praixis
+
+# Async client
+pip install "praixis[async]"
+```
+
+---
+
 ## Features
 
 - **Stateful Chat** — Persistent, session-based conversations stored in Redis with configurable TTL and automatic context-window trimming
