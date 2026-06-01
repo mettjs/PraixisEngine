@@ -45,7 +45,7 @@ pip install "praixis[async]"
 - **Usage Tracking** — Per-app prompt/completion token counters in Redis, exposed via admin endpoints
 - **Async I/O** — Fully async stack: `redis.asyncio`, `AsyncOpenAI`, `asyncpg` for PostgreSQL/pgvector
 - **Structured Output** — Optional `response_format: "json"` field on chat requests for machine-readable responses
-- **Embeddings** — Direct embedding endpoint returns the raw vector for any text input using the same multilingual model (`paraphrase-multilingual-MiniLM-L12-v2`) the RAG pipeline uses internally; model is configurable via `EMBEDDING_MODEL`
+- **Embeddings** — Direct embedding endpoint returns the raw vector for any text input using the same multilingual model (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384 dimensions) the RAG pipeline uses internally; model is configurable via `EMBEDDING_MODEL` (must be paired with `EMBEDDING_DIMS` set to the model's output dimension — startup validates the pair and fails fast if they disagree)
 
 ---
 
@@ -326,7 +326,7 @@ The answer begins streaming here...
 
 ### Embed — `POST /rag-db/embed`
 
-Returns the raw embedding vector for a text input using the same model the RAG pipeline uses internally (`paraphrase-multilingual-MiniLM-L12-v2`, 384 dimensions). Does **not** call the LLM.
+Returns the raw embedding vector for a text input using the same model the RAG pipeline uses internally (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384 dimensions by default). Does **not** call the LLM.
 
 ```json
 { "text": "What is the refund policy?" }
@@ -373,7 +373,7 @@ All admin endpoints require HTTP Basic Auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD`
 | `GET` | `/api/system/usage` | Token usage totals across all apps |
 | `GET` | `/api/system/usage/{app_name}` | Token usage totals for a specific app |
 | `GET` | `/api/system/gpu` | Current GPU slot usage (in-use / total / available) |
-| `POST` | `/api/system/gpu/reset` | Reset GPU slot counter to 0 (use after a crash leaves it stuck) |
+| `POST` | `/api/system/gpu/reset` | Rebuild the GPU slot queue to `GPU_CONCURRENCY` tokens (use after a crash leaked slots) |
 | `GET` | `/api/system/audit?limit=100&offset=0` | Last N audit events across all apps, newest first |
 | `GET` | `/api/system/audit/{app_name}` | Last N audit events for a specific app |
 | `GET` | `/api/system/vector/search?app_name=&collection_name=&query=&n_results=5` | Semantic search inside a collection |
@@ -423,7 +423,7 @@ Slots are tokens in a Redis list (`gpu:slots`). Acquiring a slot is `BLPOP gpu:s
 
 `CHUNK_CONCURRENCY` is enforced separately by an in-process `asyncio.Semaphore` inside the map-reduce pipeline and is per-worker — it limits how aggressively a single `file_summary` request fans out its chunks while it competes against other requests for the global GPU pool.
 
-On startup the lifespan hook fills the queue **only if it has not already been initialized for this Redis lifetime** (guarded by an `SET … NX` sentinel), so a multi-worker or multi-replica deploy does not multiply the slot count. A hard process crash that releases tokens improperly will therefore leak slots until either Redis is wiped or `POST /api/system/gpu/reset` is called — that admin endpoint rebuilds the queue atomically and is visible to every worker on its next acquire.
+On startup the lifespan hook fills the queue **only if it has not already been sized for the current `GPU_CONCURRENCY`** (guarded by a sentinel key that stores the slot count), so a multi-worker or multi-replica deploy does not multiply the slot count, and changing `GPU_CONCURRENCY` in `.env` and restarting the container correctly resizes the queue. A hard process crash that releases tokens improperly will leak slots until `POST /api/system/gpu/reset` is called — that admin endpoint rebuilds the queue atomically and is visible to every worker on its next acquire.
 
 ---
 

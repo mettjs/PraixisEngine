@@ -52,6 +52,12 @@ POSTGRES_URL=postgresql://praixis:yourpassword@localhost:5432/praixis
 # Admin panel credentials
 ADMIN_USERNAME=your_admin_username
 ADMIN_PASSWORD=your_admin_password
+
+# Embedding model (optional — defaults work out of the box)
+# Change only if using a different fastembed model; re-upload all collections after changing.
+# EMBEDDING_DIMS must match the model's output dimension — startup fails fast if they disagree.
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+EMBEDDING_DIMS=384
 ```
 
 **Redis URL formats:**
@@ -103,6 +109,12 @@ Make sure your `.env` has the correct URLs before running. Postgres must have th
 AI_API_URL=http://<llm-server-ip>:8081
 REDIS_URL=redis://:password@<redis-server-ip>:6379/0
 POSTGRES_URL=postgresql://<user>:<password>@<postgres-host>:5432/<db>
+```
+
+If you changed `EMBEDDING_MODEL`, pass the same value as a build arg so Docker pre-downloads the model during the image build instead of on the first request:
+
+```bash
+docker compose up --build --build-arg EMBEDDING_MODEL=your-model-name
 ```
 
 ### Tear down
