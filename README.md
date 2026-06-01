@@ -45,7 +45,7 @@ pip install "praixis[async]"
 - **Usage Tracking** — Per-app prompt/completion token counters in Redis, exposed via admin endpoints
 - **Async I/O** — Fully async stack: `redis.asyncio`, `AsyncOpenAI`, ChromaDB calls offloaded via `asyncio.to_thread`
 - **Structured Output** — Optional `response_format: "json"` field on chat requests for machine-readable responses
-- **Embeddings** — Direct embedding endpoint returns the raw vector for any text input using the same multilingual model (`paraphrase-multilingual-MiniLM-L12-v2`) the RAG pipeline uses internally; model is configurable via `EMBEDDING_MODEL`
+- **Embeddings** — Direct embedding endpoint returns the raw vector for any text input using the same multilingual model (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`) the RAG pipeline uses internally; model is configurable via `EMBEDDING_MODEL` (changing it requires re-uploading all collections)
 
 ---
 
@@ -322,7 +322,7 @@ The answer begins streaming here...
 
 ### Embed — `POST /rag-db/embed`
 
-Returns the raw embedding vector for a text input using the same model the RAG pipeline uses internally (`paraphrase-multilingual-MiniLM-L12-v2`, 384 dimensions). Does **not** call the LLM.
+Returns the raw embedding vector for a text input using the same model the RAG pipeline uses internally (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` by default). Does **not** call the LLM.
 
 ```json
 { "text": "What is the refund policy?" }
@@ -369,7 +369,7 @@ All admin endpoints require HTTP Basic Auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD`
 | `GET` | `/api/system/usage` | Token usage totals across all apps |
 | `GET` | `/api/system/usage/{app_name}` | Token usage totals for a specific app |
 | `GET` | `/api/system/gpu` | Current GPU slot usage (in-use / total / available) |
-| `POST` | `/api/system/gpu/reset` | Reset GPU slot counter to 0 (use after a crash leaves it stuck) |
+| `POST` | `/api/system/gpu/reset` | Rebuild the GPU slot queue to `GPU_CONCURRENCY` tokens (use after a crash leaked slots) |
 | `GET` | `/api/system/audit?limit=100&offset=0` | Last N audit events across all apps, newest first |
 | `GET` | `/api/system/audit/{app_name}` | Last N audit events for a specific app |
 | `GET` | `/api/system/vector/search?app_name=&collection_name=&query=&n_results=5` | Semantic search inside a collection |
@@ -469,7 +469,7 @@ Alpine.js (3.14.3) and Tailwind CSS are vendored locally — the admin panel mak
 All data is scoped to the `app_name` resolved from the API key:
 
 - **Redis sessions** are stored as `chat:{app_name}:{session_id}`
-- **ChromaDB collections** are stored as `{app_name}_{collection_name}` — two apps using the same collection name get completely separate ChromaDB collections with no overlap. Access checks also verify the `app` metadata tag, returning `403` on any mismatch
+- **ChromaDB collections** are stored as `{app_name}_{collection_name}` — two apps using the same collection name get completely separate ChromaDB collections with no overlap. Every query is scoped to the requesting app's prefix, so cross-tenant access returns `404` (collection not found) and never leaks the existence of another app's data
 - **Usage counters** are stored as `usage:{app_name}:*`
 - **Audit logs** are stored under `audit:{app_name}` in addition to the global `audit:global` list
 - **Admin operations** are separate and not scoped to any app

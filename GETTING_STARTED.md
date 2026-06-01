@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.14+
+- Python 3.13+
 - [uv](https://github.com/astral-sh/uv) — package manager
 - A running Redis instance (local, [Upstash](https://upstash.com/), or dedicated server)
 - An OpenAI-compatible LLM server ([Ollama](https://ollama.com/), LiteLLM, LM Studio, vLLM, etc.)
