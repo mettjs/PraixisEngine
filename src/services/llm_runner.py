@@ -17,9 +17,14 @@ _chunk_sem = asyncio.Semaphore(_CHUNK_CONCURRENCY)
 Message = dict[str, str]
 
 
-async def call_llm(messages: list[Message], app_name: str) -> str:
-    """Single non-streaming LLM call. Raises on empty response."""
-    async with gpu_slot():
+async def call_llm(messages: list[Message], app_name: str, gpu_ctx=gpu_slot) -> str:
+    """Single non-streaming LLM call. Raises on empty response.
+
+    ``gpu_ctx`` selects which GPU pool to draw a slot from — it defaults to the
+    shared interactive pool (``gpu_slot``). Background callers pass
+    ``hq_gpu_slot`` so they consume the reserved question-generation pool instead.
+    """
+    async with gpu_ctx():
         response = await _client.chat.completions.create(
             model=_MODEL_NAME,
             messages=messages,  # type: ignore[arg-type]

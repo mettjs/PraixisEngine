@@ -42,10 +42,28 @@ GPU_CONCURRENCY: int = int(os.getenv("GPU_CONCURRENCY", "2"))
 GPU_WAIT_TIMEOUT: float = float(os.getenv("GPU_WAIT_TIMEOUT", "30"))
 CHUNK_CONCURRENCY: int = int(os.getenv("CHUNK_CONCURRENCY", "4"))
 
+# Slots reserved exclusively for background hypothetical-question generation.
+# This is a SEPARATE pool from GPU_CONCURRENCY, so question generation can never
+# starve interactive chat/RAG and is never starved by it; total concurrent LLM
+# calls a deployment can issue is GPU_CONCURRENCY + HQ_GPU_CONCURRENCY. Set to 0
+# to disable the dedicated pool (generation then falls back to the shared pool).
+# Because generation is background and best-effort, it waits much longer for a
+# slot than interactive requests before giving up on a chunk.
+HQ_GPU_CONCURRENCY: int = int(os.getenv("HQ_GPU_CONCURRENCY", "1"))
+HQ_GPU_WAIT_TIMEOUT: float = float(os.getenv("HQ_GPU_WAIT_TIMEOUT", "300"))
+
 # --- Vector store ---
 POSTGRES_URL: str = os.getenv("POSTGRES_URL", "postgresql://praixis:praixis@localhost:5432/praixis")
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 EMBEDDING_DIMS: int = int(os.getenv("EMBEDDING_DIMS", "384"))
+
+# --- Hypothetical-question indexing ---
+# After a file's chunks are stored, an LLM generates civilian-register questions
+# each chunk answers; those questions are embedded and indexed for question-to-
+# question retrieval. Runs as a deferred background pass, so it never blocks the
+# upload response. Set HQ_ENABLED=false to skip generation entirely.
+HQ_ENABLED: bool = os.getenv("HQ_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+HQ_PER_CHUNK: int = int(os.getenv("HQ_PER_CHUNK", "5"))
 
 # --- Admin auth (no defaults — must be set in the environment) ---
 ADMIN_USERNAME: str | None = os.getenv("ADMIN_USERNAME")

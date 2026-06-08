@@ -2,9 +2,16 @@ import asyncio
 import re
 from typing import Any
 
+from src.config import HQ_ENABLED as _HQ_ENABLED
 from src.utils.vectordb.pool import get_pool
 from src.utils.vectordb.embeddings import embed
-from src.utils.vectordb.constants import COLLECTION_EXISTS, FULL_DOCUMENT, HYBRID_SEARCH, WINDOW_CHUNKS
+from src.utils.vectordb.constants import (
+    COLLECTION_EXISTS,
+    FULL_DOCUMENT,
+    HYBRID_SEARCH,
+    QUESTION_SEARCH,
+    WINDOW_CHUNKS,
+)
 
 
 def _source_filter(metadata_filter: dict[str, Any] | None) -> str | None:
@@ -66,6 +73,26 @@ async def _fetch_range(app: str, collection: str, source: str, lo: int, hi: int)
     return "\n\n".join(r["content"] for r in rows)
 
 
+_RRF_K = 60  # rank-fusion damping; matches the constant used inside HYBRID_SEARCH
+
+
+def _rrf_fuse(
+    ranked_lists: list[list[tuple[str, int]]], limit: int
+) -> list[tuple[str, int]]:
+    """Reciprocal-rank-fuse several ordered (source, chunk_index) lists.
+
+    Each list is already ranked best-first. A key's score is the sum of
+    1/(K + rank) across the lists it appears in, so a chunk surfaced by both the
+    hybrid search and the question search outranks one found by only one path.
+    Returns the top ``limit`` keys.
+    """
+    scores: dict[tuple[str, int], float] = {}
+    for ranked in ranked_lists:
+        for rank, key in enumerate(ranked, start=1):
+            scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
+    return sorted(scores, key=lambda k: scores[k], reverse=True)[:limit]
+
+
 async def query_rag_db(
     collection_name: str,
     app_name: str,
@@ -74,18 +101,42 @@ async def query_rag_db(
     metadata_filter: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     embedding = await asyncio.to_thread(embed, [question])
-    rows = await get_pool().fetch(
-        HYBRID_SEARCH,
-        embedding[0], app_name, collection_name,
-        max(n_results * 4, 40), _fts_query(question),
-        _source_filter(metadata_filter), n_results,
-    )
+    source_filter = _source_filter(metadata_filter)
+    # Over-fetch from each search so fusion has a real candidate pool to work
+    # with; the final n_results cut happens AFTER fusion, not inside either query.
+    candidate_pool = max(n_results * 4, 40)
 
-    # Group hits by source (dict preserves insertion/rrf_score order), then merge
+    # Hybrid (dense + sparse) over the source text, and — when enabled — a dense
+    # search over generated questions, run concurrently. Both return ranked
+    # (source, chunk_index) candidates on the same key so they fuse directly.
+    searches = [
+        get_pool().fetch(
+            HYBRID_SEARCH,
+            embedding[0], app_name, collection_name,
+            candidate_pool, _fts_query(question),
+            source_filter, candidate_pool,
+        )
+    ]
+    if _HQ_ENABLED:
+        searches.append(
+            get_pool().fetch(
+                QUESTION_SEARCH,
+                embedding[0], app_name, collection_name,
+                candidate_pool, source_filter, candidate_pool,
+            )
+        )
+
+    results = await asyncio.gather(*searches)
+    ranked_lists = [
+        [(r["source"], r["chunk_index"]) for r in rows] for rows in results
+    ]
+    fused = _rrf_fuse(ranked_lists, n_results)
+
+    # Group hits by source (dict preserves fused-rank order), then merge
     # overlapping windows so duplicate content is never sent to the LLM.
     source_hits: dict[str, list[int]] = {}
-    for r in rows:
-        source_hits.setdefault(r["source"], []).append(r["chunk_index"])
+    for source, chunk_index in fused:
+        source_hits.setdefault(source, []).append(chunk_index)
 
     fetch_tasks: list = []
     result_sources: list[str] = []

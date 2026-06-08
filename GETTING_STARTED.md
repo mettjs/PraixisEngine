@@ -35,9 +35,16 @@ AI_API_KEY=your-local-key
 MODEL_NAME=gemma3:12b
 
 # GPU Concurrency
-GPU_CONCURRENCY=2       # max simultaneous LLM calls
+GPU_CONCURRENCY=2       # max simultaneous interactive LLM calls
 GPU_WAIT_TIMEOUT=30     # seconds to wait for a free slot before returning 503
 CHUNK_CONCURRENCY=4     # parallel chunk fan-out per file_summary call
+
+# Improved Search (hypothetical-question indexing) — opt-in per upload via improved_search=true
+HQ_ENABLED=true        # global on/off switch for question generation
+HQ_PER_CHUNK=5         # questions generated per chunk
+HQ_GPU_CONCURRENCY=1   # GPU slots reserved for background generation (separate from GPU_CONCURRENCY;
+                       #   total backend load = GPU_CONCURRENCY + HQ_GPU_CONCURRENCY. Set 0 to share the main pool)
+HQ_GPU_WAIT_TIMEOUT=300 # seconds a background generation call waits for a reserved slot before skipping a chunk
 
 # Redis
 REDIS_URL=redis://localhost:6379/0
@@ -83,7 +90,7 @@ uv run uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
 Make sure Docker is running. The project includes a `Makefile` with two modes. `make` is built-in on macOS/Linux. On Windows, install it via [Chocolatey](https://chocolatey.org/) (`choco install make`) or use the manual commands shown below instead.
 
-In both modes the API initializes the database schema on startup (creates the `vector` and `unaccent` extensions and the `chunks` table if they don't exist), so a fresh Postgres just works.
+In both modes the API initializes the database schema on startup (creates the `vector` and `unaccent` extensions and the `chunks` and `chunk_questions` tables if they don't exist), so a fresh Postgres just works.
 
 ### Local stack — app + PostgreSQL + Redis in Docker
 

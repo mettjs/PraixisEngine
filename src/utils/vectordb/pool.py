@@ -4,7 +4,13 @@ import asyncpg
 from pgvector.asyncpg import register_vector
 
 from src.config import POSTGRES_URL as _POSTGRES_URL, EMBEDDING_DIMS as _EMBEDDING_DIMS
-from src.utils.vectordb.constants import CREATE_EXTENSION, CREATE_UNACCENT, CREATE_SCHEMA, PING
+from src.utils.vectordb.constants import (
+    CREATE_EXTENSION,
+    CREATE_UNACCENT,
+    CREATE_SCHEMA,
+    CREATE_QUESTIONS_SCHEMA,
+    PING,
+)
 from src.utils.vectordb.embeddings import embed
 
 _pool: asyncpg.Pool | None = None
@@ -48,6 +54,8 @@ async def init_db() -> None:
     )
     async with _pool.acquire() as conn:
         await conn.execute(CREATE_SCHEMA.format(dims=_EMBEDDING_DIMS))
+        # chunk_questions has an FK to chunks, so it must be created after it.
+        await conn.execute(CREATE_QUESTIONS_SCHEMA.format(dims=_EMBEDDING_DIMS))
 
 
 async def close_db() -> None:

@@ -26,6 +26,33 @@ CREATE_SCHEMA = """
         ON chunks USING hnsw (embedding vector_cosine_ops);
 """
 
+# Hypothetical-question index: one row per LLM-generated question, each pointing
+# back to its parent chunk. Querying these (question-to-question) closes the
+# genre gap between civilian phrasing and formal source text.
+# chunk_index is denormalized from the parent so window expansion needs no join.
+# ON DELETE CASCADE means deleting a file's chunks (DELETE_FILE, or the re-upload
+# DELETE->reinsert txn) automatically purges its questions — no extra bookkeeping.
+# Requires .format(dims=EMBEDDING_DIMS) at the call site.
+CREATE_QUESTIONS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS chunk_questions (
+        id          TEXT PRIMARY KEY,
+        app         TEXT NOT NULL,
+        collection  TEXT NOT NULL,
+        source      TEXT NOT NULL,
+        chunk_id    TEXT NOT NULL REFERENCES chunks (id) ON DELETE CASCADE,
+        chunk_index INTEGER NOT NULL,
+        question    TEXT NOT NULL,
+        embedding   vector({dims})
+    );
+
+    CREATE INDEX IF NOT EXISTS chunk_questions_app_col_idx
+        ON chunk_questions (app, collection);
+    CREATE INDEX IF NOT EXISTS chunk_questions_chunk_id_idx
+        ON chunk_questions (chunk_id);
+    CREATE INDEX IF NOT EXISTS chunk_questions_hnsw_idx
+        ON chunk_questions USING hnsw (embedding vector_cosine_ops);
+"""
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 PING = "SELECT 1"
@@ -69,6 +96,11 @@ DELETE_FILE = "DELETE FROM chunks WHERE app = $1 AND collection = $2 AND source 
 INSERT_CHUNK = """
     INSERT INTO chunks (id, app, collection, source, chunk_index, content, embedding, tsv)
     VALUES ($1, $2, $3, $4, $5, $6, $7, to_tsvector('simple', unaccent($6)))
+"""
+
+INSERT_QUESTION = """
+    INSERT INTO chunk_questions (id, app, collection, source, chunk_id, chunk_index, question, embedding)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 """
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
@@ -117,6 +149,35 @@ SELECT source, content, chunk_index, rrf_score
 FROM combined
 ORDER BY rrf_score DESC
 LIMIT $7
+"""
+
+# Hypothetical-question search: dense ANN over generated questions, collapsed to
+# the parent chunk they point to. Returns parent (source, chunk_index) identity —
+# NOT the question text — so the result fuses with HYBRID_SEARCH on the same key
+# and feeds the same window-expansion path. One chunk matched by several of its
+# questions yields a single row (its closest question), so it never eats multiple
+# result slots.
+# $1=embedding  $2=app  $3=collection  $4=fetch_limit
+# $5=source_filter (NULL = no filter)  $6=final_limit
+QUESTION_SEARCH = """
+WITH nearest AS (
+    SELECT source, chunk_index, chunk_id,
+           embedding <=> $1::vector AS dist
+    FROM chunk_questions
+    WHERE app = $2 AND collection = $3
+      AND ($5::text IS NULL OR source = $5::text)
+    ORDER BY embedding <=> $1::vector
+    LIMIT $4
+),
+deduped AS (
+    SELECT DISTINCT ON (chunk_id) source, chunk_index, dist
+    FROM nearest
+    ORDER BY chunk_id, dist
+)
+SELECT source, chunk_index
+FROM deduped
+ORDER BY dist
+LIMIT $6
 """
 
 # Fetch a contiguous slice of chunks from one document for window expansion.

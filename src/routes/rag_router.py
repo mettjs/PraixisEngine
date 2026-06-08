@@ -62,6 +62,21 @@ router = APIRouter(
                                 "enum": ["semantic", "character"],
                                 "description": "Chunking strategy: 'semantic' cuts at topic shifts using embeddings; 'character' uses fixed-size splits.",
                             },
+                            "improved_search": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": (
+                                    "Enable hypothetical-question indexing for this document. After upload, "
+                                    "an LLM generates natural-language questions each chunk answers; these are "
+                                    "embedded and indexed so plain, conversational queries match better against "
+                                    "formal or technical source text. "
+                                    "CAVEATS: generation runs in the background after the upload returns, so the "
+                                    "document is searchable immediately but question matching improves only once "
+                                    "generation finishes. While it runs, one or more GPU slots (the reserved "
+                                    "question-generation pool) are occupied, raising backend load. Results vary by "
+                                    "document but natural-language search accuracy usually improves."
+                                ),
+                            },
                         },
                     }
                 }
@@ -79,6 +94,15 @@ async def rag_upload_endpoint(
     chunk_size: int = Form(default=2000, ge=100, le=4000, description="Maximum characters per semantic chunk (100–4000)."),
     chunk_overlap: int = Form(default=150, ge=0, le=500, description="Overlap characters between chunks. Only applies when chunking_strategy is 'character'."),
     chunking_strategy: str = Form(default="semantic", description="Chunking strategy: 'semantic' or 'character'."),
+    improved_search: bool = Form(
+        default=False,
+        description=(
+            "Enable hypothetical-question indexing for better natural-language search on this document. "
+            "Questions are generated in the background after upload (document is searchable immediately; "
+            "matching improves once generation finishes). While running, it occupies one or more GPU slots "
+            "from the reserved question-generation pool. Results vary but accuracy usually improves."
+        ),
+    ),
     app_name: str = Depends(verify_api_key)
 ):
     return await handle_rag_upload(
@@ -88,6 +112,7 @@ async def rag_upload_endpoint(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         chunking_strategy=chunking_strategy,
+        improved_search=improved_search,
     )
 
 

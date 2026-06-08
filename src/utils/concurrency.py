@@ -1,103 +1,158 @@
 """Global GPU concurrency control, enforced via Redis.
 
-The cap is enforced by a Redis list used as a token bucket: acquiring a slot
-pops a token (BLPOP, blocks up to GPU_WAIT_TIMEOUT), releasing pushes one
-back. Every worker and every container replica shares the same queue, so
-GPU_CONCURRENCY is a single global limit regardless of how many processes
-are running.
+Two independent token buckets, each a Redis list:
+
+* ``gpu:slots`` — the shared pool for interactive, user-facing LLM calls
+  (chat, RAG answer, summary, compare), sized by ``GPU_CONCURRENCY``.
+* ``gpu:hq_slots`` — a pool reserved exclusively for background hypothetical-
+  question generation, sized by ``HQ_GPU_CONCURRENCY``.
+
+Keeping them separate means a large document's question backfill can never drain
+the slots that user requests depend on, and is itself never starved by live
+traffic. Acquiring a slot pops a token (BLPOP, blocks up to the pool's timeout),
+releasing pushes one back. Every worker and replica shares the same queues, so
+each cap is a single global limit regardless of how many processes are running.
 """
 from contextlib import asynccontextmanager
 
-from src.config import GPU_CONCURRENCY as _SLOTS, GPU_WAIT_TIMEOUT as _WAIT_TIMEOUT
+from src.config import (
+    GPU_CONCURRENCY as _SLOTS,
+    GPU_WAIT_TIMEOUT as _WAIT_TIMEOUT,
+    HQ_GPU_CONCURRENCY as _HQ_SLOTS,
+    HQ_GPU_WAIT_TIMEOUT as _HQ_WAIT_TIMEOUT,
+)
 from src.utils.store.client import gpu_redis_client as _redis
 
 _GPU_QUEUE_KEY = "gpu:slots"
 _GPU_INIT_KEY = "gpu:initialized"
+_HQ_QUEUE_KEY = "gpu:hq_slots"
+_HQ_INIT_KEY = "gpu:hq_initialized"
+
+# (queue_key, init_key, slot_count) for every pool, so init/reset/status can
+# iterate uniformly instead of duplicating logic per pool.
+_POOLS = (
+    (_GPU_QUEUE_KEY, _GPU_INIT_KEY, _SLOTS),
+    (_HQ_QUEUE_KEY, _HQ_INIT_KEY, _HQ_SLOTS),
+)
 
 
 class GPUBusyError(Exception):
-    """Raised when no slot frees up within GPU_WAIT_TIMEOUT seconds."""
+    """Raised when no slot frees up within the pool's wait timeout."""
     pass
 
 
 async def init_gpu() -> None:
-    """Populates the slot queue if it has not been sized for the current GPU_CONCURRENCY.
+    """Populates each slot queue if it has not been sized for its current count.
 
-    Called from the FastAPI lifespan hook on every process start. The sentinel
-    key stores the slot count it was last filled with; matching values skip
-    the rebuild, so multi-worker and multi-replica deployments do not multiply
-    the configured slot count. A mismatch (e.g. GPU_CONCURRENCY changed in
-    .env and the container was restarted) triggers a rebuild so config edits
-    take effect without a manual ``/gpu/reset`` call.
+    Called from the FastAPI lifespan hook on every process start. Each pool has a
+    sentinel key storing the slot count it was last filled with; matching values
+    skip the rebuild, so multi-worker and multi-replica deployments do not
+    multiply the configured counts. A mismatch (e.g. a count changed in .env and
+    the container was restarted) triggers a rebuild so config edits take effect
+    without a manual ``/gpu/reset`` call.
 
-    A consequence is that slots leaked by a hard crash persist across
-    process restarts when GPU_CONCURRENCY is unchanged — recover them with
+    A consequence is that slots leaked by a hard crash persist across process
+    restarts when the count is unchanged — recover them with
     ``POST /api/system/gpu/reset``.
     """
-    existing = await _redis.get(_GPU_INIT_KEY)
-    if existing == str(_SLOTS):
-        return
-    await _fill_queue()
+    for queue_key, init_key, slots in _POOLS:
+        existing = await _redis.get(init_key)
+        if existing != str(slots):
+            await _fill_queue(queue_key, init_key, slots)
 
 
 async def reset_gpu_counter() -> dict:
-    """Forcibly rebuilds the queue to exactly GPU_CONCURRENCY tokens.
+    """Forcibly rebuilds every pool to exactly its configured token count.
 
-    Use after a crash leaks slots, or after changing GPU_CONCURRENCY. Any
-    in-flight request still holding an old token will push it back on
-    release, transiently inflating the queue above the configured size
-    until the next acquire drains the surplus.
+    Use after a crash leaks slots, or after changing a concurrency setting. Any
+    in-flight request still holding an old token will push it back on release,
+    transiently inflating a queue above its configured size until the next
+    acquire drains the surplus.
     """
-    await _fill_queue()
-    return {"status": "success", "message": "GPU slot counter reset.", "slots_total": _SLOTS}
+    for queue_key, init_key, slots in _POOLS:
+        await _fill_queue(queue_key, init_key, slots)
+    return {
+        "status": "success",
+        "message": "GPU slot counters reset.",
+        "slots_total": _SLOTS,
+        "hq_slots_total": _HQ_SLOTS,
+    }
 
 
-async def _fill_queue() -> None:
+async def _fill_queue(queue_key: str, init_key: str, slots: int) -> None:
     pipe = _redis.pipeline()
-    pipe.delete(_GPU_QUEUE_KEY)
-    if _SLOTS > 0:
-        pipe.rpush(_GPU_QUEUE_KEY, *(["1"] * _SLOTS))
-    pipe.set(_GPU_INIT_KEY, str(_SLOTS))
+    pipe.delete(queue_key)
+    if slots > 0:
+        pipe.rpush(queue_key, *(["1"] * slots))
+    pipe.set(init_key, str(slots))
     await pipe.execute()
 
 
-async def _acquire() -> None:
+async def _acquire(queue_key: str, timeout: float) -> None:
     # BLPOP returns (key, value) when a token is popped, or None on timeout.
-    result = await _redis.blpop([_GPU_QUEUE_KEY], timeout=_WAIT_TIMEOUT)
+    result = await _redis.blpop([queue_key], timeout=timeout)
     if result is None:
         raise GPUBusyError("All GPU slots are occupied. Please try again shortly.")
 
 
-async def _release() -> None:
-    await _redis.rpush(_GPU_QUEUE_KEY, "1")
+async def _release(queue_key: str) -> None:
+    await _redis.rpush(queue_key, "1")
 
 
 @asynccontextmanager
 async def gpu_slot():
-    """Blocks until a slot is free (up to GPU_WAIT_TIMEOUT seconds), then holds it for the duration."""
-    await _acquire()
+    """Blocks until a shared (interactive) slot is free, then holds it for the duration."""
+    await _acquire(_GPU_QUEUE_KEY, _WAIT_TIMEOUT)
     try:
         yield
     finally:
-        await _release()
+        await _release(_GPU_QUEUE_KEY)
+
+
+@asynccontextmanager
+async def hq_gpu_slot():
+    """Holds a slot from the reserved question-generation pool.
+
+    Waits up to ``HQ_GPU_WAIT_TIMEOUT`` (much longer than interactive, since this
+    is best-effort background work). When ``HQ_GPU_CONCURRENCY`` is 0 the
+    dedicated pool is disabled and generation falls back to the shared pool.
+    """
+    if _HQ_SLOTS <= 0:
+        async with gpu_slot():
+            yield
+        return
+    await _acquire(_HQ_QUEUE_KEY, _HQ_WAIT_TIMEOUT)
+    try:
+        yield
+    finally:
+        await _release(_HQ_QUEUE_KEY)
 
 
 async def acquire_gpu_slot() -> None:
-    """Blocks until a slot is free (up to GPU_WAIT_TIMEOUT seconds).
+    """Blocks until a shared slot is free (up to GPU_WAIT_TIMEOUT seconds).
 
     Used by streaming responses that must hold the slot across the entire
     stream; must be paired with ``release_gpu_slot()`` in a finally block.
     """
-    await _acquire()
+    await _acquire(_GPU_QUEUE_KEY, _WAIT_TIMEOUT)
 
 
 async def release_gpu_slot() -> None:
-    """Releases a slot previously acquired with acquire_gpu_slot()."""
-    await _release()
+    """Releases a shared slot previously acquired with acquire_gpu_slot()."""
+    await _release(_GPU_QUEUE_KEY)
 
 
 async def get_gpu_status() -> dict:
-    """Returns current slot usage, computed live from the queue length."""
+    """Returns current slot usage for both pools, computed live from queue lengths."""
     available = int(await _redis.llen(_GPU_QUEUE_KEY))
     in_use = max(0, _SLOTS - available)
-    return {"slots_total": _SLOTS, "slots_in_use": in_use, "slots_available": available}
+    hq_available = int(await _redis.llen(_HQ_QUEUE_KEY))
+    hq_in_use = max(0, _HQ_SLOTS - hq_available)
+    return {
+        "slots_total": _SLOTS,
+        "slots_in_use": in_use,
+        "slots_available": available,
+        "hq_slots_total": _HQ_SLOTS,
+        "hq_slots_in_use": hq_in_use,
+        "hq_slots_available": hq_available,
+    }

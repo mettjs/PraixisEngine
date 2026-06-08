@@ -34,14 +34,15 @@ pip install "praixis[async]"
 ## Features
 
 - **Stateful Chat** — Persistent, session-based conversations stored in Redis with configurable TTL and automatic context-window trimming
-- **RAG (Retrieval-Augmented Generation)** — Upload documents into named vector collections (single or batch) and ask grounded questions with source attribution; supports metadata filters and custom chunk sizes
+- **RAG (Retrieval-Augmented Generation)** — Upload documents into named vector collections (single or batch) and ask grounded questions with source attribution; supports metadata filters and custom chunk sizes. Retrieval is hybrid: dense vector similarity fused with full-text keyword search via Reciprocal Rank Fusion
+- **Improved Search (Hypothetical-Question Indexing)** — Opt-in per upload (`improved_search=true`). After a document is stored, an LLM generates the natural-language questions each chunk answers; those questions are embedded and indexed so plain, conversational queries match better against formal or technical source text (closing the "genre gap" between how people ask and how documents are written). Generation runs in the background on a **dedicated GPU pool** so it never competes with live chat/RAG traffic; the document is searchable immediately and question matching improves once generation finishes
 - **File Processing** — Summarize or run custom tasks on uploaded PDFs, DOCX, and TXT files using a map-reduce pipeline with real-time streaming progress events
 - **Multi-tenancy** — API key authentication with full data isolation between apps; each app only sees its own sessions and collections
 - **Hashed API Keys** — Keys are stored as SHA-256 hashes in Redis; the plaintext is never persisted and is only returned once at generation time
 - **Audit Log** — Redis-backed event log tracking key generation/revocation, auth failures, file operations, and admin actions — paginated per app or globally
 - **Admin Panel** — HTTP Basic Auth-protected endpoints for provisioning/revoking API keys, wiping sessions, token usage stats, GPU monitoring, and audit log access
 - **Rate Limiting** — Per-API-key, per-endpoint request limits to protect GPU resources (falls back to IP for unauthenticated routes)
-- **Redis-backed GPU Concurrency** — Global token bucket in Redis (BLPOP/RPUSH) enforces `GPU_CONCURRENCY` across all workers and container replicas; requests block up to `GPU_WAIT_TIMEOUT` seconds (default 30 s) for a free slot, then return `503`
+- **Redis-backed GPU Concurrency** — Global token buckets in Redis (BLPOP/RPUSH) enforce concurrency across all workers and container replicas. Two independent pools: a shared `GPU_CONCURRENCY` pool for interactive calls (requests block up to `GPU_WAIT_TIMEOUT` seconds, default 30 s, then return `503`) and a separate `HQ_GPU_CONCURRENCY` pool reserved for background question generation so it never starves live traffic
 - **Usage Tracking** — Per-app prompt/completion token counters in Redis, exposed via admin endpoints
 - **Async I/O** — Fully async stack: `redis.asyncio`, `AsyncOpenAI`, `asyncpg` for PostgreSQL/pgvector
 - **Structured Output** — Optional `response_format: "json"` field on chat requests for machine-readable responses
@@ -91,10 +92,10 @@ Client App (with X-API-Key)
 
 ### Request Flow — RAG Q&A
 
-1. Client uploads a file via `POST /rag-db/upload` → text is extracted and stored in pgvector, scoped by `(app, collection)` columns in the `chunks` table
+1. Client uploads a file via `POST /rag-db/upload` → text is extracted and stored in pgvector, scoped by `(app, collection)` columns in the `chunks` table. If `improved_search=true`, hypothetical questions are generated in the background and indexed in the `chunk_questions` table, each linked back to its parent chunk
 2. Client sends `POST /rag-db/ask` with a question, `collection_name`, and optional `n_results`
 3. If a prior session exists, the question is **reformulated** into a standalone query using chat history
-4. Top-N relevant chunks are retrieved from pgvector and injected as context
+4. Candidates are retrieved by hybrid search (dense + keyword) over the source text and — when a question index exists — by dense search over the generated questions (matched parent chunk to parent chunk); both ranked lists are fused with Reciprocal Rank Fusion, de-duplicated to one entry per chunk, then the top-N are injected as context
 5. Response is streamed back: metadata headers (`SESSION_ID`, `SEARCH_QUERY`, `SOURCES`) first, then answer tokens; full answer is saved to the session
 
 ### Large Document Pipeline (Map-Reduce)
@@ -153,7 +154,7 @@ PraixisEngine/
     │   └── security.py        # API key auth (SHA-256 lookup) + admin Basic Auth
     └── utils/
         ├── ai_client.py       # OpenAI-compatible client factory
-        ├── concurrency.py     # Redis GPU slot counter, GPUBusyError
+        ├── concurrency.py     # Redis GPU slot counters (interactive + reserved question-gen pools), GPUBusyError
         ├── store/             # Redis client + data stores
         │   ├── client.py      # Shared async Redis client
         │   ├── sessions.py    # Chat session history
@@ -165,13 +166,14 @@ PraixisEngine/
         │   ├── logger.py
         │   └── limiter.py     # SlowAPI rate limiter
         └── vectordb/          # pgvector connection, ingest, and retrieval
-            ├── constants.py   # All SQL query strings
+            ├── constants.py   # All SQL query strings (chunks + chunk_questions schema & queries)
             ├── pool.py        # asyncpg connection pool lifecycle
             ├── embeddings.py  # fastembed text embedding
             ├── chunking.py    # Semantic and character chunking strategies
             ├── collections.py # Collection & file management
             ├── ingestion.py   # Chunk & index documents
-            └── retrieval.py   # Hybrid semantic + FTS search
+            ├── questions.py   # Hypothetical-question generation (Improved Search), reserved GPU pool
+            └── retrieval.py   # Hybrid (dense + FTS) search fused with question-index search via RRF
 ```
 
 ---
@@ -275,6 +277,9 @@ Accepts one or more files in a single request. Re-uploading a file that already 
 | `chunking_strategy` | `"semantic"` | `"semantic"` — splits at natural topic boundaries using embeddings; `"character"` — fixed-size recursive splits |
 | `chunk_size` | `2000` | Maximum characters per chunk (100–4000) |
 | `chunk_overlap` | `150` | Overlap characters between chunks (0–500). Only applies when `chunking_strategy` is `"character"` |
+| `improved_search` | `false` | Enable hypothetical-question indexing for this document (see [Improved Search](#improved-search-hypothetical-question-indexing) below) |
+
+> **Improved Search caveats.** When `improved_search=true`, question generation runs **in the background after the upload response returns** — the document is searchable immediately, but natural-language matching improves only once generation completes. While it runs, one or more GPU slots from the **reserved question-generation pool** (`HQ_GPU_CONCURRENCY`) are occupied, raising backend load. Results vary by document, but conversational-query accuracy usually improves. Requires the global `HQ_ENABLED` flag to be on. If a document is deleted or re-uploaded mid-generation, the in-flight pass is discarded and the newer upload regenerates.
 
 Returns per-file results:
 
@@ -321,6 +326,27 @@ Returns a **streaming response**. The first three lines are metadata headers, fo
 [SOURCES:filename1.pdf,filename2.pdf]
 The answer begins streaming here...
 ```
+
+---
+
+### Improved Search (Hypothetical-Question Indexing)
+
+Formal documents (laws, policies, technical manuals) are written in a different register than the way people ask about them. A citizen asks *"can they fire me for being pregnant?"* while the statute says *"termination of the employment contract on grounds of pregnancy is prohibited."* Their embeddings sit far apart even though they're about the same thing — so pure semantic search can miss the right passage.
+
+**Improved Search** closes that gap from the document side. When you upload with `improved_search=true`:
+
+1. The document is chunked, embedded, and stored as usual — **searchable immediately**.
+2. In the **background**, an LLM reads each chunk and writes the plain-language questions a non-expert would ask that the chunk answers.
+3. Those questions are embedded and indexed in a separate `chunk_questions` table, each pointing back to its parent chunk.
+
+At query time, the user's question is matched **question-to-question** (same register, much tighter similarity) in addition to the normal hybrid search; the two result sets are fused and de-duplicated to the parent chunk. One chunk surfaced by several of its questions still counts once.
+
+**Operational notes:**
+
+- **Opt-in and additive.** It's off by default and set per upload. It's an additional ranking signal, not a replacement — on queries that already match well it changes nothing; its value shows on conversational, low-keyword-overlap questions over large corpora.
+- **Dedicated GPU pool.** Generation draws from a separate slot pool (`HQ_GPU_CONCURRENCY`, default `1`) so it never starves interactive chat/RAG, and is never starved by it. Total concurrent LLM calls a deployment issues is `GPU_CONCURRENCY + HQ_GPU_CONCURRENCY` — size your backend accordingly. See [GPU Concurrency](#gpu-concurrency).
+- **Best-effort.** Generation has no progress tracking. A process restart mid-generation leaves a document partially enriched — re-upload it to finish. A per-chunk generation failure is logged and skipped, not fatal.
+- **Global kill-switch.** Set `HQ_ENABLED=false` to disable generation everywhere regardless of the per-upload flag. Retrieval transparently ignores the question index when a document has none.
 
 ---
 
@@ -372,8 +398,8 @@ All admin endpoints require HTTP Basic Auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD`
 | `DELETE` | `/api/system/sessions/{app_name}` | Force-wipe all active sessions for a specific app |
 | `GET` | `/api/system/usage` | Token usage totals across all apps |
 | `GET` | `/api/system/usage/{app_name}` | Token usage totals for a specific app |
-| `GET` | `/api/system/gpu` | Current GPU slot usage (in-use / total / available) |
-| `POST` | `/api/system/gpu/reset` | Rebuild the GPU slot queue to `GPU_CONCURRENCY` tokens (use after a crash leaked slots) |
+| `GET` | `/api/system/gpu` | Current GPU slot usage for both pools — interactive (`slots_*`) and reserved question-generation (`hq_slots_*`) |
+| `POST` | `/api/system/gpu/reset` | Rebuild both GPU slot queues to `GPU_CONCURRENCY` / `HQ_GPU_CONCURRENCY` tokens (use after a crash leaked slots) |
 | `GET` | `/api/system/audit?limit=100&offset=0` | Last N audit events across all apps, newest first |
 | `GET` | `/api/system/audit/{app_name}` | Last N audit events for a specific app |
 | `GET` | `/api/system/vector/search?app_name=&collection_name=&query=&n_results=5` | Semantic search inside a collection |
@@ -415,15 +441,27 @@ Endpoints that call the LLM (`/chat`, `/ask`, `/file_summary`, `/summarize`, `/c
 
 | Env var | Default | Description |
 |---|---|---|
-| `GPU_CONCURRENCY` | `2` | Max simultaneous LLM calls (global — see below) |
-| `GPU_WAIT_TIMEOUT` | `30` | Seconds a request waits for a free slot before returning 503 |
+| `GPU_CONCURRENCY` | `2` | Max simultaneous **interactive** LLM calls (global — see below) |
+| `GPU_WAIT_TIMEOUT` | `30` | Seconds an interactive request waits for a free slot before returning 503 |
 | `CHUNK_CONCURRENCY` | `4` | Max parallel chunk fan-out per `file_summary` map-reduce call (per-worker, internal) |
+| `HQ_GPU_CONCURRENCY` | `1` | Slots reserved exclusively for background hypothetical-question generation (separate pool) |
+| `HQ_GPU_WAIT_TIMEOUT` | `300` | Seconds a background generation call waits for a reserved slot before skipping a chunk |
 
-Slots are tokens in a Redis list (`gpu:slots`). Acquiring a slot is `BLPOP gpu:slots <timeout>`; releasing is `RPUSH gpu:slots 1`. Because Redis is the single source of truth, **`GPU_CONCURRENCY` is a true global limit** — running uvicorn with `--workers N` or scaling to multiple container replicas behind the same Redis still caps total in-flight LLM calls at `GPU_CONCURRENCY`. When all tokens are taken, `BLPOP` blocks the request for up to `GPU_WAIT_TIMEOUT` seconds; only after that timeout does the request fail with HTTP `503 Service Unavailable`. Callers may retry immediately or with a short backoff.
+There are **two independent token-bucket pools**, each a Redis list:
 
-`CHUNK_CONCURRENCY` is enforced separately by an in-process `asyncio.Semaphore` inside the map-reduce pipeline and is per-worker — it limits how aggressively a single `file_summary` request fans out its chunks while it competes against other requests for the global GPU pool.
+- `gpu:slots` — the shared pool for interactive, user-facing calls (`/chat`, `/ask`, `/file_summary`, `/summarize`, `/compare`), sized by `GPU_CONCURRENCY`.
+- `gpu:hq_slots` — reserved exclusively for background question generation (Improved Search), sized by `HQ_GPU_CONCURRENCY`.
 
-On startup the lifespan hook fills the queue **only if it has not already been sized for the current `GPU_CONCURRENCY`** (guarded by a sentinel key that stores the slot count), so a multi-worker or multi-replica deploy does not multiply the slot count, and changing `GPU_CONCURRENCY` in `.env` and restarting the container correctly resizes the queue. A hard process crash that releases tokens improperly will leak slots until `POST /api/system/gpu/reset` is called — that admin endpoint rebuilds the queue atomically and is visible to every worker on its next acquire.
+Acquiring a slot is `BLPOP <queue> <timeout>`; releasing is `RPUSH <queue> 1`. Because Redis is the single source of truth, **each cap is a true global limit** — running uvicorn with `--workers N` or scaling to multiple container replicas behind the same Redis still caps total in-flight calls per pool. When all tokens are taken, `BLPOP` blocks for up to the pool's timeout; only after that does an interactive request fail with HTTP `503 Service Unavailable` (callers may retry with a short backoff), while a background generation call simply skips that chunk.
+
+**Why a separate pool?** Generating questions for a large document is many LLM calls. Routing them through the shared pool would let one upload starve live chat/RAG into 503s (or get starved itself and silently drop questions). The reserved pool guarantees interactive traffic always keeps its `GPU_CONCURRENCY` slots and generation always has capacity. The trade-off: the **total** concurrent load your LLM backend may see is `GPU_CONCURRENCY + HQ_GPU_CONCURRENCY`. Tune for your hardware:
+- *Backend has headroom* → keep them additive (e.g. `2` + `1` = up to `3` concurrent).
+- *Fixed total budget* → split it (e.g. `GPU_CONCURRENCY=1` + `HQ_GPU_CONCURRENCY=1` keeps the total at `2`, carving one slot out for questions).
+- *Disable the reserve* → `HQ_GPU_CONCURRENCY=0` makes generation fall back to the shared pool (it will then contend with interactive traffic).
+
+`CHUNK_CONCURRENCY` is enforced separately by an in-process `asyncio.Semaphore` inside the map-reduce pipeline and is per-worker — it limits how aggressively a single `file_summary` request fans out its chunks while it competes for the shared GPU pool.
+
+On startup the lifespan hook fills each queue **only if it has not already been sized for its current count** (guarded by a per-pool sentinel key), so a multi-worker or multi-replica deploy does not multiply the counts, and changing a count in `.env` and restarting the container correctly resizes that queue. A hard process crash that releases tokens improperly will leak slots until `POST /api/system/gpu/reset` is called — that admin endpoint rebuilds **both** queues atomically and is visible to every worker on its next acquire. `GET /api/system/gpu` reports usage for both pools (`slots_*` and `hq_slots_*`).
 
 ---
 

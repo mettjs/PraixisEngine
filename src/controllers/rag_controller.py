@@ -6,6 +6,7 @@ from src.services.rag_service import generate_comparison, generate_rag_answer, g
 from src.utils.file_parser import extract_text_from_file, MAX_FILE_SIZE
 from src.utils.vectordb.embeddings import get_embedding
 from src.utils.vectordb.ingestion import add_file_to_rag_db
+from src.utils.vectordb.questions import schedule_question_generation
 from src.utils.vectordb.collections import (
     list_all_collections,
     list_files_in_collection,
@@ -72,6 +73,7 @@ async def handle_rag_upload(
     chunk_size: int = 2000,
     chunk_overlap: int = 150,
     chunking_strategy: str = "semantic",
+    improved_search: bool = False,
 ) -> dict:
     if chunking_strategy not in ("semantic", "character"):
         raise HTTPException(status_code=422, detail="chunking_strategy must be 'semantic' or 'character'.")
@@ -91,7 +93,7 @@ async def handle_rag_upload(
             if not document_text.strip():
                 results.append({"filename": file.filename, "status": "error", "detail": "File is empty or unreadable."})
                 continue
-            await add_file_to_rag_db(
+            chunk_rows = await add_file_to_rag_db(
                 text=document_text,
                 collection_name=collection_name,
                 filename=file.filename,
@@ -100,6 +102,16 @@ async def handle_rag_upload(
                 chunk_overlap=chunk_overlap,
                 chunking_strategy=chunking_strategy,
             )
+            # Chunks are now searchable. When improved_search is requested,
+            # generate hypothetical questions in the background so the upload
+            # response is not blocked on LLM generation.
+            if improved_search:
+                schedule_question_generation(
+                    app_name=app_name,
+                    collection_name=collection_name,
+                    source=file.filename,
+                    chunks=chunk_rows,
+                )
             logger.info(f"Batch uploaded file: {file.filename} to collection: {collection_name} for app: {app_name}")
             await log_event("FILE_UPLOADED", {"filename": file.filename, "collection": collection_name}, app_name=app_name)
             results.append({"filename": file.filename, "status": "success"})

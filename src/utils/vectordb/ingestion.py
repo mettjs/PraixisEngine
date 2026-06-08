@@ -15,7 +15,13 @@ async def add_file_to_rag_db(
     chunk_size: int = 2000,
     chunk_overlap: int = 150,
     chunking_strategy: str = "semantic",
-) -> str:
+) -> list[dict]:
+    """Chunk, embed, and store a document, replacing any prior copy of the file.
+
+    Returns the inserted chunk rows as dicts with keys ``id``, ``chunk_index``,
+    and ``content`` so the caller can drive deferred hypothetical-question
+    generation against the parent chunks.
+    """
     if chunking_strategy == "semantic":
         chunks = await asyncio.to_thread(semantic_chunk, text, max_chunk_chars=chunk_size)
     else:
@@ -34,4 +40,5 @@ async def add_file_to_rag_db(
         async with conn.transaction():
             await conn.execute(DELETE_FILE, app_name, collection_name, filename)
             await conn.executemany(INSERT_CHUNK, rows)
-    return collection_name
+
+    return [{"id": r[0], "chunk_index": r[4], "content": r[5]} for r in rows]
