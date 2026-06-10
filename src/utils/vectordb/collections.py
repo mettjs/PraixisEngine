@@ -27,6 +27,10 @@ async def get_vector_stats() -> tuple[int, int]:
     return int(row["cols"]), int(row["chunks"])
 
 
+async def collection_exists(collection_name: str, app_name: str) -> bool:
+    return bool(await get_pool().fetchval(COLLECTION_EXISTS, app_name, collection_name))
+
+
 async def list_all_collections(app_name: str) -> list[str]:
     rows = await get_pool().fetch(LIST_COLLECTIONS, app_name)
     return [r["collection"] for r in rows]

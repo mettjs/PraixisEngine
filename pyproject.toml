@@ -10,6 +10,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "fastapi>=0.135.3",
     "langchain-text-splitters>=1.1.1",
+    "numpy>=2.1",
     "openai>=2.31.0",
     "pydantic>=2.12.5",
     "pypdf>=6.10.0",

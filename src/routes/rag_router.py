@@ -21,70 +21,7 @@ router = APIRouter(
 )
 
 
-@router.post(
-    "/upload",
-    openapi_extra={
-        "requestBody": {
-            "content": {
-                "multipart/form-data": {
-                    "schema": {
-                        "type": "object",
-                        "required": ["files"],
-                        "properties": {
-                            "files": {
-                                "type": "array",
-                                "items": {"type": "string", "format": "binary"},
-                                "description": "One or more .pdf, .docx, or .txt files — max 20 MB each.",
-                            },
-                            "collection_name": {
-                                "type": "string",
-                                "default": "main",
-                                "pattern": r"^[a-zA-Z0-9_-]{3,63}$",
-                                "description": "Target collection name. Defaults to 'main'.",
-                            },
-                            "chunk_size": {
-                                "type": "integer",
-                                "default": 2000,
-                                "minimum": 100,
-                                "maximum": 4000,
-                                "description": "Maximum characters per semantic chunk (100–4000).",
-                            },
-                            "chunk_overlap": {
-                                "type": "integer",
-                                "default": 150,
-                                "minimum": 0,
-                                "maximum": 500,
-                                "description": "Overlap characters between chunks. Only applies when chunking_strategy is 'character'.",
-                            },
-                            "chunking_strategy": {
-                                "type": "string",
-                                "default": "semantic",
-                                "enum": ["semantic", "character"],
-                                "description": "Chunking strategy: 'semantic' cuts at topic shifts using embeddings; 'character' uses fixed-size splits.",
-                            },
-                            "improved_search": {
-                                "type": "boolean",
-                                "default": False,
-                                "description": (
-                                    "Enable hypothetical-question indexing for this document. After upload, "
-                                    "an LLM generates natural-language questions each chunk answers; these are "
-                                    "embedded and indexed so plain, conversational queries match better against "
-                                    "formal or technical source text. "
-                                    "CAVEATS: generation runs in the background after the upload returns, so the "
-                                    "document is searchable immediately but question matching improves only once "
-                                    "generation finishes. While it runs, one or more GPU slots (the reserved "
-                                    "question-generation pool) are occupied, raising backend load. Results vary by "
-                                    "document but natural-language search accuracy usually improves."
-                                ),
-                            },
-                        },
-                    }
-                }
-            },
-            "required": True,
-        }
-    },
-)
+@router.post("/upload")
 @limiter.limit("15/minute")
 async def rag_upload_endpoint(
     request: Request,
@@ -93,7 +30,8 @@ async def rag_upload_endpoint(
                                 description="Target collection name. Defaults to 'main'."),
     chunk_size: int = Form(default=2000, ge=100, le=4000, description="Maximum characters per semantic chunk (100–4000)."),
     chunk_overlap: int = Form(default=150, ge=0, le=500, description="Overlap characters between chunks. Only applies when chunking_strategy is 'character'."),
-    chunking_strategy: str = Form(default="semantic", description="Chunking strategy: 'semantic' or 'character'."),
+    chunking_strategy: str = Form(default="semantic", pattern=r"^(semantic|character)$",
+                                  description="Chunking strategy: 'semantic' cuts at topic shifts using embeddings; 'character' uses fixed-size splits."),
     improved_search: bool = Form(
         default=False,
         description=(

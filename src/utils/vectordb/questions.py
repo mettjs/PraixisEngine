@@ -11,6 +11,7 @@ single chunk that fails generation is logged and skipped rather than aborting th
 whole file (unlike ``llm_runner.map_calls``, which cancels the batch on any error).
 """
 import asyncio
+import re
 import uuid
 
 import asyncpg
@@ -49,12 +50,18 @@ _SYSTEM_PROMPT = (
 )
 
 
+# Matches a leading list marker ("- ", "• ", "* ", "1. ", "2) ", "(3) ") and
+# nothing else — unlike a str.lstrip charset, it can't eat meaningful leading
+# digits from a question that genuinely starts with a number or year.
+_LIST_MARKER_RE = re.compile(r"^\s*(?:[-•*]+|\(?\d+[.)])\s*")
+
+
 def _parse_questions(raw: str, limit: int) -> list[str]:
     """Turn the LLM's line-separated output into a clean question list."""
     out: list[str] = []
     seen: set[str] = set()
     for line in raw.splitlines():
-        q = line.strip().lstrip("-•*0123456789.) \t").strip()
+        q = _LIST_MARKER_RE.sub("", line).strip()
         if len(q) < 8:
             continue
         key = q.lower()

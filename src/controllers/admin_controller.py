@@ -14,13 +14,13 @@ from src.utils.vectordb.collections import (
     delete_file_from_collection as _delete_file,
 )
 from src.utils.vectordb.retrieval import search_collection as _search_collection
-from src.utils.ai_client import get_ai_client
+from src.utils.ai_client import get_async_ai_client
 from src.utils.concurrency import get_gpu_status, reset_gpu_counter
 from src.utils.store.audit import log_event, get_audit_log
 from src.utils.system.logger import logger
 
-# Sync client used only for the health-check ping (no LLM calls, no token tracking)
-_llm_sync_client = get_ai_client()
+# Used only for the health-check ping (no LLM calls, no token tracking)
+_llm_client = get_async_ai_client()
 
 
 async def get_redis_health() -> dict:
@@ -43,7 +43,7 @@ async def get_vectordb_health() -> dict:
 
 async def get_llm_health() -> dict:
     try:
-        await asyncio.to_thread(lambda: _llm_sync_client.with_options(timeout=5.0).models.list())
+        await _llm_client.with_options(timeout=5.0).models.list()
         return {"status": "online"}
     except Exception:
         logger.error("LLM backend health check failed.")

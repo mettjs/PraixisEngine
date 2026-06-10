@@ -13,6 +13,7 @@ traffic. Acquiring a slot pops a token (BLPOP, blocks up to the pool's timeout),
 releasing pushes one back. Every worker and replica shares the same queues, so
 each cap is a single global limit regardless of how many processes are running.
 """
+import asyncio
 from contextlib import asynccontextmanager
 
 from src.config import (
@@ -128,18 +129,46 @@ async def hq_gpu_slot():
         await _release(_HQ_QUEUE_KEY)
 
 
-async def acquire_gpu_slot() -> None:
+# Strong references to in-flight release tasks: a release started inside a
+# cancelled scope (client disconnect) must survive its caller and complete.
+_release_tasks: set[asyncio.Task] = set()
+
+
+class SlotHandle:
+    """A single acquired shared-pool permit.
+
+    ``release()`` is idempotent — the streaming-response wrapper and any other
+    owner can all call it, and exactly one token is pushed back. The push runs
+    as a shielded task so cancellation of the caller (e.g. a client
+    disconnecting mid-stream) cannot interrupt it and leak the permit.
+    """
+
+    __slots__ = ("_released",)
+
+    def __init__(self) -> None:
+        self._released = False
+
+    async def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        task = asyncio.ensure_future(_release(_GPU_QUEUE_KEY))
+        _release_tasks.add(task)
+        task.add_done_callback(_release_tasks.discard)
+        await asyncio.shield(task)
+
+
+async def acquire_gpu_slot() -> SlotHandle:
     """Blocks until a shared slot is free (up to GPU_WAIT_TIMEOUT seconds).
 
     Used by streaming responses that must hold the slot across the entire
-    stream; must be paired with ``release_gpu_slot()`` in a finally block.
+    stream. The returned handle's ``release()`` must be guaranteed to run —
+    hand it to ``SlotReleasingStreamingResponse`` rather than relying on the
+    body generator's ``finally`` (a generator closed before its first
+    iteration never runs it).
     """
     await _acquire(_GPU_QUEUE_KEY, _WAIT_TIMEOUT)
-
-
-async def release_gpu_slot() -> None:
-    """Releases a shared slot previously acquired with acquire_gpu_slot()."""
-    await _release(_GPU_QUEUE_KEY)
+    return SlotHandle()
 
 
 async def get_gpu_status() -> dict:

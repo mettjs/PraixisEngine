@@ -5,10 +5,12 @@ except Exception as e:
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
 from src.utils.system.limiter import limiter
 from slowapi.extension import _rate_limit_exceeded_handler
 from src.routes.main_router import api_router
+from src.routes.ui_router import STATIC_DIR
 
 
 @asynccontextmanager
@@ -34,6 +36,7 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 app.include_router(api_router)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 if __name__ == "__main__":
     import uvicorn

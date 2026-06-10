@@ -31,8 +31,11 @@ async def add_file_to_rag_db(
         raise ValueError("Document produced no chunks; nothing to ingest.")
     embeddings = await asyncio.to_thread(embed, chunks)
 
+    # Full UUIDs: a truncated suffix collides within a single large document
+    # (birthday bound — ~10k chunks over a 6-hex space fails almost surely),
+    # aborting the whole insert transaction on the PK constraint.
     rows = [
-        (f"{filename}_{uuid.uuid4().hex[:6]}", app_name, collection_name, filename, i, chunk, emb)
+        (uuid.uuid4().hex, app_name, collection_name, filename, i, chunk, emb)
         for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
     ]
 

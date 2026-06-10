@@ -8,6 +8,7 @@ from src.utils.vectordb.embeddings import get_embedding
 from src.utils.vectordb.ingestion import add_file_to_rag_db
 from src.utils.vectordb.questions import schedule_question_generation
 from src.utils.vectordb.collections import (
+    collection_exists,
     list_all_collections,
     list_files_in_collection,
     delete_collection,
@@ -16,7 +17,8 @@ from src.utils.vectordb.collections import (
 from src.utils.vectordb.retrieval import query_rag_db, get_full_document_text
 from src.utils.store.sessions import get_session_history
 from src.utils.system.logger import logger
-from src.utils.concurrency import GPUBusyError, acquire_gpu_slot, release_gpu_slot
+from src.utils.system.streaming import SlotReleasingStreamingResponse
+from src.utils.concurrency import GPUBusyError, acquire_gpu_slot
 from src.utils.store.audit import log_event
 
 
@@ -27,7 +29,7 @@ async def handle_list_collections(app_name: str) -> dict:
         return {"status": "success", "total_documents": len(collections), "active_collections": collections}
     except Exception as e:
         logger.error(f"Error in handle_list_collections: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error.")
 
 
 async def handle_list_files(collection_name: str, app_name: str) -> dict:
@@ -40,7 +42,7 @@ async def handle_list_files(collection_name: str, app_name: str) -> dict:
         raise HTTPException(status_code=404, detail=str(ve))
     except Exception as e:
         logger.error(f"Error in handle_list_files: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error.")
 
 
 async def handle_delete_collection(collection_name: str, app_name: str) -> dict:
@@ -64,7 +66,7 @@ async def handle_delete_file(collection_name: str, filename: str, app_name: str)
         raise HTTPException(status_code=404, detail=str(ve))
     except Exception as e:
         logger.error(f"Error in handle_delete_file: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error.")
 
 async def handle_rag_upload(
     collection_name: str,
@@ -125,6 +127,11 @@ async def handle_rag_upload(
 
 
 async def handle_rag_question(request: QuestionRequest, app_name: str) -> StreamingResponse:
+    # Check the collection before any LLM work, so a typo'd name is a clean 404
+    # instead of a burned reformulation call and a streamed non-answer.
+    if not await collection_exists(collection_name=request.collection_name, app_name=app_name):
+        raise HTTPException(status_code=404, detail=f"Collection '{request.collection_name}' does not exist.")
+
     try:
         history = await get_session_history(session_id=request.session_id, app_name=app_name) if request.session_id else []
         search_query = await reformulate_query(history, request.question, app_name=app_name)
@@ -141,17 +148,26 @@ async def handle_rag_question(request: QuestionRequest, app_name: str) -> Stream
         logger.error(f"Error preparing RAG question for app: {app_name}: {str(e)}")
         raise HTTPException(status_code=500, detail="RAG Generation Error")
 
+    # The collection exists, so an empty result means the metadata filter
+    # excluded everything. Answering would just stream "not found in context"
+    # while holding a GPU slot — return early instead.
+    if not relevant_chunks:
+        raise HTTPException(
+            status_code=404,
+            detail="No content matched the question in this collection. Check the metadata filter.",
+        )
+
     try:
-        await acquire_gpu_slot()
+        slot = await acquire_gpu_slot()
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    # The slot is released in generate_rag_answer's finally. If anything fails
-    # between acquiring it and handing the generator to Starlette, release here
-    # so the permit can't leak.
+    # The response wrapper owns the slot and releases it whether the stream
+    # completes, errors, or the client disconnects before it even starts. If
+    # anything fails before the wrapper takes over, release here.
     try:
         logger.info(f"Streaming RAG answer for app: {app_name}, collection: {request.collection_name}")
-        return StreamingResponse(
+        return SlotReleasingStreamingResponse(
             generate_rag_answer(
                 question=request.question,
                 app_name=app_name,
@@ -160,10 +176,11 @@ async def handle_rag_question(request: QuestionRequest, app_name: str) -> Stream
                 session_id=request.session_id,
                 system_prompt=request.system_prompt,
             ),
+            slot=slot,
             media_type="text/event-stream",
         )
     except Exception:
-        await release_gpu_slot()
+        await slot.release()
         raise
 
 

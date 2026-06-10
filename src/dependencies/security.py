@@ -1,3 +1,4 @@
+import asyncio
 import secrets
 
 from fastapi import Depends, Security, HTTPException, status
@@ -23,6 +24,10 @@ async def verify_api_key(api_key: str = Security(_api_key_header)) -> str:
     if not app_name:
         logger.warning("Invalid API Key attempted.")
         await log_event("AUTH_FAIL", {"key_preview": api_key[:14] + "..." if len(api_key) > 14 else "***"})
+        # Auth failures never reach the per-key rate limiter (it wraps the
+        # endpoint, which runs after this dependency), so throttle key-guessing
+        # and the Redis lookups + audit writes it generates here.
+        await asyncio.sleep(0.5)
         raise HTTPException(status_code=403, detail="Invalid or revoked API Key.")
 
     logger.info(f"API Key authenticated for app: {app_name}")
@@ -32,7 +37,7 @@ async def verify_api_key(api_key: str = Security(_api_key_header)) -> str:
 _security_basic = HTTPBasic()
 
 
-def verify_admin_credentials(credentials: HTTPBasicCredentials = Depends(_security_basic)):
+async def verify_admin_credentials(credentials: HTTPBasicCredentials = Depends(_security_basic)):
     """Validates the master username and password from the .env file."""
     correct_username = ADMIN_USERNAME
     correct_password = ADMIN_PASSWORD
@@ -54,6 +59,9 @@ def verify_admin_credentials(credentials: HTTPBasicCredentials = Depends(_securi
 
     if not (is_correct_username and is_correct_password):
         logger.warning("Incorrect Master Username or Password")
+        # Basic auth has no lockout, so slow brute-force attempts down. The
+        # sleep is async — it ties up this request, not a worker.
+        await asyncio.sleep(1.0)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect Master Username or Password",

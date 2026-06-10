@@ -1,13 +1,8 @@
 import asyncio
 from collections.abc import AsyncGenerator
-from src.config import MODEL_NAME as _MODEL_NAME
-from src.utils.ai_client import get_async_ai_client, record_llm_usage
 from src.utils.file_parser import chunk_text
-from src.utils.store.sessions import get_or_create_session, persist_history
-from src.utils.concurrency import release_gpu_slot
 from src.services.llm_runner import call_llm, map_calls
-
-_client = get_async_ai_client()
+from src.services.session_stream import open_user_turn, stream_assistant_turn
 
 
 async def generate_rag_answer(
@@ -20,8 +15,8 @@ async def generate_rag_answer(
 ) -> AsyncGenerator[str, None]:
     """Generates an answer to a question based only on the context provided by the collection.
 
-    The GPU slot is acquired by the controller before streaming starts and is
-    released in the finally block here.
+    The GPU slot is acquired by the controller and released by the
+    ``SlotReleasingStreamingResponse`` wrapping this generator.
     """
     if not system_prompt:
         system_prompt = (
@@ -31,51 +26,32 @@ async def generate_rag_answer(
             "If the answer is not contained in the context, explain that the answer cannot be found in the document, do not fabricate any information."
         )
 
-    full_answer = ""
-    active_session_id: str | None = None
-    history: list | None = None
-    try:
-        active_session_id, history = await get_or_create_session(
-            session_id=session_id,
-            system_prompt=system_prompt,
-            app_name=app_name,
-        )
+    active_session_id, history = await open_user_turn(
+        app_name=app_name,
+        user_message=question,
+        session_id=session_id,
+        system_prompt=system_prompt,
+    )
 
-        history.append({"role": "user", "content": question})
-        await persist_history(app_name=app_name, session_id=active_session_id, history=history)
+    formatted_chunks = [f"[Source: {chunk['source']}]\n{chunk['text']}" for chunk in context_chunks]
+    context_text = "\n\n---\n\n".join(formatted_chunks)
+    augmented_question = f"Context:\n{context_text}\n\nQuestion: {question}"
 
-        formatted_chunks = [f"[Source: {chunk['source']}]\n{chunk['text']}" for chunk in context_chunks]
-        context_text = "\n\n---\n\n".join(formatted_chunks)
-        augmented_question = f"Context:\n{context_text}\n\nQuestion: {question}"
+    # The LLM sees the augmented question; the session stores the original one.
+    temp_history = history[:-1] + [{"role": "user", "content": augmented_question}]
 
-        temp_history = history[:-1] + [{"role": "user", "content": augmented_question}]
+    yield f"[SESSION_ID:{active_session_id}]\n"
+    yield f"[SEARCH_QUERY:{search_query}]\n"
+    unique_sources = list({chunk["source"] for chunk in context_chunks})
+    yield f"[SOURCES:{','.join(unique_sources)}]\n"
 
-        yield f"[SESSION_ID:{active_session_id}]\n"
-        yield f"[SEARCH_QUERY:{search_query}]\n"
-        unique_sources = list({chunk["source"] for chunk in context_chunks})
-        yield f"[SOURCES:{','.join(unique_sources)}]\n"
-
-        response = await _client.chat.completions.create(  # type: ignore[call-overload, arg-type]
-            model=_MODEL_NAME,
-            messages=temp_history,
-            stream=True,
-            stream_options={"include_usage": True},
-        )
-
-        usage_recorded = False
-        async for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content is not None:
-                token = chunk.choices[0].delta.content
-                full_answer += token
-                yield token
-            if not usage_recorded and getattr(chunk, "usage", None):
-                await record_llm_usage(chunk, app_name)
-                usage_recorded = True
-    finally:
-        if full_answer and active_session_id and history is not None:
-            history.append({"role": "assistant", "content": full_answer})
-            await persist_history(app_name=app_name, session_id=active_session_id, history=history)
-        await release_gpu_slot()
+    async for token in stream_assistant_turn(
+        messages=temp_history,
+        app_name=app_name,
+        session_id=active_session_id,
+        history=history,
+    ):
+        yield token
 
 
 async def reformulate_query(history: list, latest_question: str, app_name: str) -> str:

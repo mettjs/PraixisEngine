@@ -75,6 +75,16 @@ async def _fetch_range(app: str, collection: str, source: str, lo: int, hi: int)
 
 _RRF_K = 60  # rank-fusion damping; matches the constant used inside HYBRID_SEARCH
 
+# Candidate over-fetch before rank fusion. Fusion only works if each ranked
+# list is wider than the final cut, and the RAG path fuses up to three lists
+# (dense, sparse, question index) — so it over-fetches more aggressively than
+# the single-query admin search. The asymmetry is deliberate; don't "fix" one
+# side to match the other.
+_RAG_POOL_FACTOR = 4
+_RAG_POOL_MIN = 40   # sized to exploit the HNSW ef_search ceiling (60)
+_ADMIN_POOL_FACTOR = 3
+_ADMIN_POOL_MIN = 15
+
 
 def _rrf_fuse(
     ranked_lists: list[list[tuple[str, int]]], limit: int
@@ -104,7 +114,7 @@ async def query_rag_db(
     source_filter = _source_filter(metadata_filter)
     # Over-fetch from each search so fusion has a real candidate pool to work
     # with; the final n_results cut happens AFTER fusion, not inside either query.
-    candidate_pool = max(n_results * 4, 40)
+    candidate_pool = max(n_results * _RAG_POOL_FACTOR, _RAG_POOL_MIN)
 
     # Hybrid (dense + sparse) over the source text, and — when enabled — a dense
     # search over generated questions, run concurrently. Both return ranked
@@ -163,7 +173,7 @@ async def search_collection(
     rows = await get_pool().fetch(
         HYBRID_SEARCH,
         embedding[0], app_name, collection_name,
-        max(n_results * 3, 15), _fts_query(query), None, n_results,
+        max(n_results * _ADMIN_POOL_FACTOR, _ADMIN_POOL_MIN), _fts_query(query), None, n_results,
     )
     return [
         {"source": r["source"], "text": r["content"], "score": round(float(r["rrf_score"]), 4)}

@@ -5,21 +5,22 @@ from src.utils.file_parser import extract_text_from_file, MAX_FILE_SIZE
 from src.services.chat_service import generate_chat_stream, generate_file_summary
 from src.utils.store.sessions import delete_session, get_all_active_sessions, get_session_history
 from src.utils.system.logger import logger
-from src.utils.concurrency import GPUBusyError, acquire_gpu_slot, release_gpu_slot
+from src.utils.system.streaming import SlotReleasingStreamingResponse
+from src.utils.concurrency import GPUBusyError, acquire_gpu_slot
 
 
 async def handle_chat(request: ChatRequest, app_name: str) -> StreamingResponse:
     try:
-        await acquire_gpu_slot()
+        slot = await acquire_gpu_slot()
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    # The slot is released in generate_chat_stream's finally. If anything fails
-    # between acquiring it and handing the generator to Starlette, release here
-    # so the permit can't leak.
+    # The response wrapper owns the slot and releases it whether the stream
+    # completes, errors, or the client disconnects before it even starts. If
+    # anything fails before the wrapper takes over, release here.
     try:
         logger.info(f"Received chat request for app: {app_name}, session: {request.session_id}")
-        return StreamingResponse(
+        return SlotReleasingStreamingResponse(
             generate_chat_stream(
                 app_name=app_name,
                 prompt=request.prompt,
@@ -27,10 +28,11 @@ async def handle_chat(request: ChatRequest, app_name: str) -> StreamingResponse:
                 session_id=request.session_id,
                 response_format=request.response_format,
             ),
+            slot=slot,
             media_type="text/event-stream",
         )
     except Exception:
-        await release_gpu_slot()
+        await slot.release()
         raise
 
 
