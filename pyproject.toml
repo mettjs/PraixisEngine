@@ -1,6 +1,6 @@
 [project]
 name = "praixisengine"
-version = "1.0.0"
+version = "1.2.2"
 description = "Multi-tenant AI backend API providing decoupled business logic (chat, RAG, file processing) over an OpenAI-compatible LLM."
 readme = "README.md"
 requires-python = ">=3.13"
