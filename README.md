@@ -248,11 +248,11 @@ Multipart form upload. Fields:
 
 | Field | Default | Description |
 |---|---|---|
-| `file` | required | `.pdf`, `.docx`, or `.txt` — max **20 MB** |
+| `file` | required | PDF, DOCX, or TXT — max **20 MB** |
 | `task` | `"Summarize the key points of this document."` | Instruction for the AI |
 | `tone` | `"Professional and objective"` | Desired response tone |
 
-Returns `413 Request Entity Too Large` if the file exceeds 20 MB.
+Returns `413 Request Entity Too Large` if the file exceeds 20 MB. The format is detected from the filename extension, falling back to the part's `Content-Type` header, then to magic bytes (see [RAG Upload](#rag-upload--post-rag-dbupload)).
 
 ---
 
@@ -270,9 +270,11 @@ Returns `413 Request Entity Too Large` if the file exceeds 20 MB.
 
 Accepts one or more files in a single request. Re-uploading a file that already exists in the collection replaces it automatically.
 
+The format of each file is resolved as: filename extension → the part's declared `Content-Type` header (`application/octet-stream` is treated as "no information") → magic bytes (`%PDF-`, `PK\x03\x04`). The filename itself is always required — it is the document's stored identity, used by the delete/summarize/compare endpoints.
+
 | Field | Default | Description |
 |---|---|---|
-| `files` | required | One or more `.pdf`, `.docx`, or `.txt` files — max **20 MB** each |
+| `files` | required | One or more PDF, DOCX, or TXT files — max **20 MB** each |
 | `collection_name` | `"main"` | Target collection (alphanumeric/dash/underscore, 3–63 chars) |
 | `chunking_strategy` | `"semantic"` | `"semantic"` — splits at natural topic boundaries using embeddings; `"character"` — fixed-size recursive splits |
 | `chunk_size` | `2000` | Maximum characters per chunk (100–4000) |

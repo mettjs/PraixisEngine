@@ -91,7 +91,7 @@ async def handle_rag_upload(
             if len(content) > MAX_FILE_SIZE:
                 results.append({"filename": file.filename, "status": "error", "detail": "File exceeds 20 MB limit."})
                 continue
-            document_text = extract_text_from_file(file.filename, content)
+            document_text = extract_text_from_file(file.filename, content, content_type=file.content_type)
             if not document_text.strip():
                 results.append({"filename": file.filename, "status": "error", "detail": "File is empty or unreadable."})
                 continue

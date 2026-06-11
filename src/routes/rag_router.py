@@ -25,7 +25,9 @@ router = APIRouter(
 @limiter.limit("15/minute")
 async def rag_upload_endpoint(
     request: Request,
-    files: list[UploadFile] = File(..., description="One or more .pdf, .docx, or .txt files — max 20 MB each."),
+    files: list[UploadFile] = File(..., description="One or more PDF, DOCX, or TXT files — max 20 MB each. "
+                                                    "Type is detected from the filename extension, falling back to the "
+                                                    "part's Content-Type, then to magic bytes."),
     collection_name: str = Form(default="main", pattern=r"^[a-zA-Z0-9_-]{3,63}$",
                                 description="Target collection name. Defaults to 'main'."),
     chunk_size: int = Form(default=2000, ge=100, le=4000, description="Maximum characters per semantic chunk (100–4000)."),

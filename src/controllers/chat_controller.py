@@ -46,7 +46,7 @@ async def handle_file_summary(file: UploadFile, task: str, tone: str, app_name: 
         raise HTTPException(status_code=413, detail="File too large. Maximum allowed size is 20 MB.")
 
     try:
-        document_text = extract_text_from_file(file.filename, content)
+        document_text = extract_text_from_file(file.filename, content, content_type=file.content_type)
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
 
