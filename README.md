@@ -236,9 +236,14 @@ curl -X POST "http://localhost:8080/general-requests/chat" \
 | `prompt` | required | The user message |
 | `system_prompt` | `"You are a helpful institutional assistant."` | Only applied when creating a new session; ignored on existing sessions |
 | `session_id` | `null` | Existing session ID to continue a conversation |
+| `stream` | `true` | `true` — stream tokens as `text/event-stream`; `false` — return one buffered JSON body |
 | `response_format` | `"text"` | `"text"` or `"json"` — instructs the LLM to return structured JSON |
 
-Returns a streaming response. The first line is always `[SESSION_ID:<id>]` — save this to continue the conversation.
+By default returns a streaming response. The first line is always `[SESSION_ID:<id>]` — save this to continue the conversation. With `stream=false` the same reply arrives as one JSON body:
+
+```json
+{"session_id": "a1b2c3d4e5f6...", "content": "The full reply..."}
+```
 
 ---
 
@@ -251,6 +256,14 @@ Multipart form upload. Fields:
 | `file` | required | PDF, DOCX, or TXT — max **20 MB** |
 | `task` | `"Summarize the key points of this document."` | Instruction for the AI |
 | `tone` | `"Professional and objective"` | Desired response tone |
+| `stream` | `true` | `true` — stream tokens as `text/event-stream`; `false` — return one buffered JSON body |
+| `response_format` | `"text"` | `"text"` or `"json"` — instructs the LLM to return structured JSON (applied to the final synthesis only) |
+
+When streaming, the first line is `[FILE:<filename>]`, then for multi-chunk documents `[PROGRESS:mapping N chunks]`, a `[PROGRESS:mapped k/N chunks]` tick as each chunk completes, and `[PROGRESS:reducing N chunks]`, followed by the result tokens. With `stream=false` the same result arrives as a single JSON body (progress markers are dropped):
+
+```json
+{"filename": "report.pdf", "content": "The document outlines..."}
+```
 
 Returns `413 Request Entity Too Large` if the file exceeds 20 MB. The format is detected from the filename extension, falling back to the part's `Content-Type` header, then to magic bytes (see [RAG Upload](#rag-upload--post-rag-dbupload)).
 
@@ -319,14 +332,27 @@ Returns per-file results:
 | `n_results` | `5` | Number of context chunks to retrieve (1–20) |
 | `system_prompt` | `null` | Optional system prompt override; falls back to the built-in RAG instruction when omitted |
 | `metadata_filter` | `null` | Optional metadata filter dict (e.g. `{"source": "file.pdf"}`) |
+| `stream` | `true` | `true` — stream tokens as `text/event-stream`; `false` — return one buffered JSON body |
+| `response_format` | `"text"` | `"text"` or `"json"` — instructs the LLM to return structured JSON |
 
-Returns a **streaming response**. The first three lines are metadata headers, followed by the answer tokens:
+By default returns a **streaming response**. The first three lines are metadata headers, followed by the answer tokens:
 
 ```
 [SESSION_ID:a1b2c3d4e5f6...]
 [SEARCH_QUERY:the reformulated standalone query]
 [SOURCES:filename1.pdf,filename2.pdf]
 The answer begins streaming here...
+```
+
+With `stream=false` the same metadata and answer arrive as one JSON body:
+
+```json
+{
+  "session_id": "a1b2c3d4e5f6...",
+  "search_query": "the reformulated standalone query",
+  "sources": ["filename1.pdf", "filename2.pdf"],
+  "content": "The full answer..."
+}
 ```
 
 ---
@@ -376,8 +402,8 @@ Response:
 | `GET` | `/rag-db/{collection}/files` | List files inside a collection |
 | `DELETE` | `/rag-db/delete/{collection}` | Delete an entire collection |
 | `DELETE` | `/rag-db/{collection}/files/{filename}` | Delete a single document from a collection |
-| `GET` | `/rag-db/knowledge_base/{collection}/files/{filename}/summary` | 3-sentence summary of a document |
-| `POST` | `/rag-db/knowledge_base/compare` | Bullet-point diff between two documents (JSON body: `collection_name`, `file_1`, `file_2`) |
+| `GET` | `/rag-db/knowledge_base/{collection}/files/{filename}/summary` | 3-sentence summary of a document. Returns `{"filename", "content"}` by default; pass `?stream=true` for a token stream (`[FILE:...]` header, then `[PROGRESS:...]` lines, then tokens). Also accepts `?response_format=json` |
+| `POST` | `/rag-db/knowledge_base/compare` | Bullet-point diff between two documents (JSON body: `collection_name`, `file_1`, `file_2`, optional `stream` and `response_format`). Returns `{"file_1", "file_2", "content"}` by default; with `"stream": true`, streams `[PROGRESS:...]` lines then tokens |
 
 ---
 

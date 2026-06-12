@@ -17,7 +17,7 @@ from src.utils.vectordb.collections import (
 from src.utils.vectordb.retrieval import query_rag_db, get_full_document_text
 from src.utils.store.sessions import get_session_history
 from src.utils.system.logger import logger
-from src.utils.system.streaming import SlotReleasingStreamingResponse
+from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json
 from src.utils.concurrency import GPUBusyError, acquire_gpu_slot
 from src.utils.store.audit import log_event
 
@@ -162,55 +162,113 @@ async def handle_rag_question(request: QuestionRequest, app_name: str) -> Stream
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    # The response wrapper owns the slot and releases it whether the stream
-    # completes, errors, or the client disconnects before it even starts. If
-    # anything fails before the wrapper takes over, release here.
+    answer = generate_rag_answer(
+        question=request.question,
+        app_name=app_name,
+        context_chunks=relevant_chunks,
+        search_query=search_query,
+        session_id=request.session_id,
+        system_prompt=request.system_prompt,
+        response_format=request.response_format,
+    )
+
+    # The streaming wrapper owns the slot and releases it whether the stream
+    # completes, errors, or the client disconnects before it even starts. The
+    # buffered path drains the same generator and must release the slot itself.
+    # If anything fails before either takes over, release here.
     try:
-        logger.info(f"Streaming RAG answer for app: {app_name}, collection: {request.collection_name}")
-        return SlotReleasingStreamingResponse(
-            generate_rag_answer(
-                question=request.question,
-                app_name=app_name,
-                context_chunks=relevant_chunks,
-                search_query=search_query,
-                session_id=request.session_id,
-                system_prompt=request.system_prompt,
-            ),
-            slot=slot,
-            media_type="text/event-stream",
-        )
+        if request.stream:
+            logger.info(f"Streaming RAG answer for app: {app_name}, collection: {request.collection_name}")
+            return SlotReleasingStreamingResponse(answer, slot=slot, media_type="text/event-stream")
+        logger.info(f"Buffering RAG answer for app: {app_name}, collection: {request.collection_name}")
+        try:
+            return await drain_to_json(answer)
+        finally:
+            await slot.release()
     except Exception:
         await slot.release()
         raise
 
 
-async def handle_summarize_document(collection_name: str, filename: str, app_name: str) -> dict:
+async def handle_summarize_document(
+    collection_name: str, filename: str, app_name: str, stream: bool = False, response_format: str = "text"
+) -> StreamingResponse | dict:
     try:
         document_text = await get_full_document_text(collection_name=collection_name, app_name=app_name, filename=filename)
-        summary = await generate_summary(document_text, app_name=app_name)
-        logger.info(f"Generated {filename} summary for app: {app_name}")
-        return {"filename": filename, "summary": summary}
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Error in handle_summarize_document: {str(e)}")
         raise HTTPException(status_code=500, detail="An error occurred while generating the summary.")
 
+    # generate_summary self-acquires a GPU slot per LLM call, so we must NOT
+    # pre-acquire here.
+    async def _summary_with_header():
+        yield f"[FILE:{filename}]\n"
+        async for piece in generate_summary(document_text, app_name=app_name, response_format=response_format):
+            yield piece
 
-async def handle_compare_documents(collection_name: str, file_1: str, file_2: str, app_name: str) -> dict:
+    if not stream:
+        try:
+            body = await drain_to_json(_summary_with_header())
+        except GPUBusyError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except Exception as e:
+            logger.error(f"Error in handle_summarize_document: {str(e)}")
+            raise HTTPException(status_code=500, detail="An error occurred while generating the summary.")
+        logger.info(f"Generated {filename} summary for app: {app_name}")
+        return body
+
+    async def _guarded():
+        try:
+            async for piece in _summary_with_header():
+                yield piece
+        except GPUBusyError as e:
+            yield f"[ERROR:{e}]\n"
+
+    logger.info(f"Streaming {filename} summary for app: {app_name}")
+    return StreamingResponse(_guarded(), media_type="text/event-stream")
+
+
+async def handle_compare_documents(
+    collection_name: str, file_1: str, file_2: str, app_name: str, stream: bool = False, response_format: str = "text"
+) -> StreamingResponse | dict:
     try:
         doc1_text, doc2_text = await asyncio.gather(
             get_full_document_text(collection_name=collection_name, app_name=app_name, filename=file_1),
             get_full_document_text(collection_name=collection_name, app_name=app_name, filename=file_2),
         )
-        comparison = await generate_comparison(doc1_text, doc2_text, file_1, file_2, app_name=app_name)
-        logger.info(f"Generated comparison between {file_1} and {file_2} for app: {app_name}")
-        return {"file_1": file_1, "file_2": file_2, "comparison": comparison}
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Error in handle_compare_documents: {str(e)}")
         raise HTTPException(status_code=500, detail="An error occurred while generating the comparison.")
+
+    # generate_comparison self-acquires a GPU slot per LLM call, so we must NOT
+    # pre-acquire here.
+    comparison = generate_comparison(doc1_text, doc2_text, file_1, file_2, app_name=app_name, response_format=response_format)
+
+    if not stream:
+        try:
+            body = await drain_to_json(comparison)
+        except GPUBusyError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except Exception as e:
+            logger.error(f"Error in handle_compare_documents: {str(e)}")
+            raise HTTPException(status_code=500, detail="An error occurred while generating the comparison.")
+        logger.info(f"Generated comparison between {file_1} and {file_2} for app: {app_name}")
+        # Echo the request's filenames alongside the generated content.
+        return {"file_1": file_1, "file_2": file_2, **body}
+
+    async def _guarded():
+        try:
+            async for piece in comparison:
+                yield piece
+        except GPUBusyError as e:
+            yield f"[ERROR:{e}]\n"
+
+    logger.info(f"Streaming comparison between {file_1} and {file_2} for app: {app_name}")
+    return StreamingResponse(_guarded(), media_type="text/event-stream")
 
 
 async def handle_embed(request: EmbedRequest) -> dict:

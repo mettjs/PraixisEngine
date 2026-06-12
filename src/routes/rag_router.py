@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Path, Request, UploadFile, Form
+from fastapi import APIRouter, Depends, File, Path, Query, Request, UploadFile, Form
 from src.dependencies.security import verify_api_key
 from src.models.schemas import CompareRequest, EmbedRequest, QuestionRequest
 from src.controllers.rag_controller import (
@@ -124,6 +124,8 @@ async def rag_compare_documents(
         file_1=compare_request.file_1,
         file_2=compare_request.file_2,
         app_name=app_name,
+        stream=compare_request.stream,
+        response_format=compare_request.response_format,
     )
 
 
@@ -133,6 +135,11 @@ async def rag_summarize_document(
     request: Request,
     collection_name: str,
     filename: str,
+    stream: bool = Query(default=False, description="Stream tokens as text/event-stream, or return one buffered JSON body."),
+    response_format: str = Query(default="text", pattern=r"^(text|json)$", description="LLM content format: 'text' or 'json'."),
     app_name: str = Depends(verify_api_key)
 ):
-    return await handle_summarize_document(collection_name=collection_name, filename=filename, app_name=app_name)
+    return await handle_summarize_document(
+        collection_name=collection_name, filename=filename, app_name=app_name,
+        stream=stream, response_format=response_format,
+    )

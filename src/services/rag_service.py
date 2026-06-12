@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import AsyncGenerator
 from src.utils.file_parser import chunk_text
-from src.services.llm_runner import call_llm, map_calls
+from src.services.llm_runner import call_llm, map_calls_iter, stream_llm
 from src.services.session_stream import open_user_turn, stream_assistant_turn
 
 
@@ -12,6 +12,7 @@ async def generate_rag_answer(
     search_query: str,
     system_prompt: str | None = None,
     session_id: str | None = None,
+    response_format: str = "text",
 ) -> AsyncGenerator[str, None]:
     """Generates an answer to a question based only on the context provided by the collection.
 
@@ -45,11 +46,16 @@ async def generate_rag_answer(
     unique_sources = list({chunk["source"] for chunk in context_chunks})
     yield f"[SOURCES:{','.join(unique_sources)}]\n"
 
+    extra: dict = {}
+    if response_format == "json":
+        extra["response_format"] = {"type": "json_object"}
+
     async for token in stream_assistant_turn(
         messages=temp_history,
         app_name=app_name,
         session_id=active_session_id,
         history=history,
+        extra=extra,
     ):
         yield token
 
@@ -86,71 +92,133 @@ async def reformulate_query(history: list, latest_question: str, app_name: str) 
     return content.strip() if content else latest_question
 
 
-async def _map_reduce(
+async def _map_reduce_stream(
     text: str,
     map_prompt: str,
     reduce_prompt: str,
+    single_chunk_prompt: str,
     app_name: str,
-    single_chunk_prompt: str | None = None,
-) -> str:
-    """Runs a map-reduce pipeline over chunked text using the LLM."""
+    extra: dict | None = None,
+) -> AsyncGenerator[str, None]:
+    """Streaming map-reduce: yields ``[PROGRESS:...]`` markers through the map
+    phase, then streams the final synthesis token-by-token. ``extra`` is applied
+    only to that final call — the map phase produces intermediate notes that are
+    concatenated, so it stays text. Each LLM call self-acquires its GPU slot, so
+    the caller must NOT pre-acquire."""
     chunks = chunk_text(text=text, max_words_per_chunk=1500)
+    total = len(chunks)
 
-    if len(chunks) == 1:
-        if single_chunk_prompt:
-            return await call_llm(
-                [{"role": "user", "content": f"{single_chunk_prompt}\n\n{chunks[0]}"}], app_name
-            )
-        return chunks[0]
+    if total == 1:
+        messages = [{"role": "user", "content": f"{single_chunk_prompt}\n\n{chunks[0]}"}]
+        async for token in stream_llm(messages, app_name, extra=extra):
+            yield token
+        return
 
-    extracted = await map_calls(
+    yield f"[PROGRESS:mapping {total} chunks]\n"
+    extracted: list[str] = []
+    async for item in map_calls_iter(
         [[{"role": "user", "content": f"{map_prompt}\n\n{chunk}"}] for chunk in chunks],
         app_name,
-    )
-    return await call_llm(
-        [{"role": "user", "content": f"{reduce_prompt}\n\n" + "\n\n".join(extracted)}], app_name
-    )
+    ):
+        if isinstance(item, list):
+            extracted = item
+        else:
+            yield f"[PROGRESS:mapped {item}/{total} chunks]\n"
+    yield f"[PROGRESS:reducing {total} chunks]\n"
+    reduce_messages = [{"role": "user", "content": f"{reduce_prompt}\n\n" + "\n\n".join(extracted)}]
+    async for token in stream_llm(reduce_messages, app_name, extra=extra):
+        yield token
 
 
-async def generate_summary(document_text: str, app_name: str) -> str:
-    """Summarizes a document using map-reduce for large texts."""
-    return await _map_reduce(
+async def generate_summary(
+    document_text: str, app_name: str, response_format: str = "text"
+) -> AsyncGenerator[str, None]:
+    """Summarizes a document using map-reduce, streaming the final summary."""
+    extra: dict = {}
+    if response_format == "json":
+        extra["response_format"] = {"type": "json_object"}
+    async for piece in _map_reduce_stream(
         document_text,
         map_prompt="Extract the key points from the following text in concise bullet points:",
         reduce_prompt="Based on these extracted key points from different sections of a document, write a 3-sentence professional summary:",
-        app_name=app_name,
         single_chunk_prompt="Please provide a 3-sentence professional summary of the following document:",
-    )
+        app_name=app_name,
+        extra=extra,
+    ):
+        yield piece
 
 
-async def generate_comparison(doc1_text: str, doc2_text: str, file_1: str, file_2: str, app_name: str) -> str:
-    """Compares two documents using map-reduce to preserve full context."""
-    digest_1, digest_2 = await asyncio.gather(
-        _map_reduce(
-            doc1_text,
-            map_prompt=f"Extract every distinct fact, rule, figure, and clause from the following excerpt of '{file_1}'. Be exhaustive — nothing should be lost. Use concise bullet points:",
-            reduce_prompt=f"The following are extracted notes from all sections of '{file_1}'. Consolidate them into a single, organised list of key facts — remove duplicates but preserve all unique information:",
-            app_name=app_name,
-        ),
-        _map_reduce(
-            doc2_text,
-            map_prompt=f"Extract every distinct fact, rule, figure, and clause from the following excerpt of '{file_2}'. Be exhaustive — nothing should be lost. Use concise bullet points:",
-            reduce_prompt=f"The following are extracted notes from all sections of '{file_2}'. Consolidate them into a single, organised list of key facts — remove duplicates but preserve all unique information:",
-            app_name=app_name,
-        ),
-    )
+async def generate_comparison(
+    doc1_text: str, doc2_text: str, file_1: str, file_2: str, app_name: str, response_format: str = "text"
+) -> AsyncGenerator[str, None]:
+    """Compares two documents using map-reduce to preserve full context, then
+    streams the final comparison. Both documents share one map fan-out so
+    progress ticks cover the whole phase; the per-document digests are
+    intermediate and stay non-streamed. ``response_format`` applies only to the
+    final call."""
+    extra: dict = {}
+    if response_format == "json":
+        extra["response_format"] = {"type": "json_object"}
 
-    return await call_llm(
-        [
-            {
-                "role": "user",
-                "content": (
-                    f"Compare these two documents. Provide a bulleted list of strictly what has changed "
-                    f"or what is distinctly different between them.\n\n"
-                    f"--- Document 1 ({file_1}) ---\n{digest_1}\n\n"
-                    f"--- Document 2 ({file_2}) ---\n{digest_2}"
-                ),
-            }
-        ],
-        app_name,
-    )
+    docs = [
+        {"filename": filename, "chunks": chunk_text(text=text, max_words_per_chunk=1500), "start": 0}
+        for filename, text in ((file_1, doc1_text), (file_2, doc2_text))
+    ]
+
+    # Combined map phase across both documents. A single-chunk document skips
+    # map-reduce entirely — the chunk itself is its digest.
+    jobs: list[list[dict[str, str]]] = []
+    for doc in docs:
+        if len(doc["chunks"]) == 1:
+            continue
+        doc["start"] = len(jobs)
+        jobs += [
+            [{"role": "user", "content": (
+                f"Extract every distinct fact, rule, figure, and clause from the following excerpt of "
+                f"'{doc['filename']}'. Be exhaustive — nothing should be lost. Use concise bullet points:\n\n{chunk}"
+            )}]
+            for chunk in doc["chunks"]
+        ]
+
+    extracted: list[str] = []
+    if jobs:
+        total = len(jobs)
+        yield f"[PROGRESS:mapping {total} chunks]\n"
+        async for item in map_calls_iter(jobs, app_name):
+            if isinstance(item, list):
+                extracted = item
+            else:
+                yield f"[PROGRESS:mapped {item}/{total} chunks]\n"
+
+    # Reduce each mapped document's notes into its digest, concurrently.
+    async def _digest(doc: dict) -> str:
+        if len(doc["chunks"]) == 1:
+            return doc["chunks"][0]
+        notes = extracted[doc["start"]: doc["start"] + len(doc["chunks"])]
+        return await call_llm(
+            [{"role": "user", "content": (
+                f"The following are extracted notes from all sections of '{doc['filename']}'. Consolidate them "
+                f"into a single, organised list of key facts — remove duplicates but preserve all unique "
+                f"information:\n\n" + "\n\n".join(notes)
+            )}],
+            app_name,
+        )
+
+    if jobs:
+        yield "[PROGRESS:consolidating notes]\n"
+    digest_1, digest_2 = await asyncio.gather(_digest(docs[0]), _digest(docs[1]))
+
+    yield "[PROGRESS:comparing]\n"
+    compare_messages = [
+        {
+            "role": "user",
+            "content": (
+                f"Compare these two documents. Provide a bulleted list of strictly what has changed "
+                f"or what is distinctly different between them.\n\n"
+                f"--- Document 1 ({file_1}) ---\n{digest_1}\n\n"
+                f"--- Document 2 ({file_2}) ---\n{digest_2}"
+            ),
+        }
+    ]
+    async for token in stream_llm(compare_messages, app_name, extra=extra):
+        yield token

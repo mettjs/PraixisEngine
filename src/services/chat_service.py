@@ -1,7 +1,7 @@
 from collections.abc import AsyncGenerator
 from src.utils.file_parser import chunk_text
 from src.utils.system.logger import logger
-from src.services.llm_runner import stream_llm, map_calls
+from src.services.llm_runner import stream_llm, map_calls_iter
 from src.services.session_stream import open_user_turn, stream_assistant_turn
 
 
@@ -44,20 +44,28 @@ async def generate_file_summary(
     task: str,
     tone: str,
     app_name: str,
+    response_format: str = "text",
 ) -> AsyncGenerator[str, None]:
     """Processes a document based on user instructions, streaming progress events
     then the result. Each LLM call manages its own GPU slot via the shared runner,
-    so the caller must NOT pre-acquire a slot."""
+    so the caller must NOT pre-acquire a slot.
+
+    ``response_format`` is applied only to the final synthesis call — the map
+    phase produces intermediate notes that are concatenated, so it stays text."""
     text_chunks = chunk_text(text=document_text, max_words_per_chunk=1500)
     system_setup = f"You are a highly capable AI. Your tone must be: {tone}."
     total = len(text_chunks)
+
+    extra: dict = {}
+    if response_format == "json":
+        extra["response_format"] = {"type": "json_object"}
 
     if total == 1:
         messages = [
             {"role": "system", "content": f"{system_setup}\n\nTask: {task}"},
             {"role": "user", "content": text_chunks[0]},
         ]
-        async for token in stream_llm(messages, app_name):
+        async for token in stream_llm(messages, app_name, extra=extra):
             yield token
         return
 
@@ -68,7 +76,8 @@ async def generate_file_summary(
     )
     logger.info(f"Mapping {total} chunks...")
     yield f"[PROGRESS:mapping {total} chunks]\n"
-    mini_results = await map_calls(
+    mini_results: list[str] = []
+    async for item in map_calls_iter(
         [
             [
                 {"role": "system", "content": map_prompt},
@@ -77,7 +86,11 @@ async def generate_file_summary(
             for chunk in text_chunks
         ],
         app_name,
-    )
+    ):
+        if isinstance(item, list):
+            mini_results = item
+        else:
+            yield f"[PROGRESS:mapped {item}/{total} chunks]\n"
 
     # REDUCE PHASE — stream the synthesised answer
     logger.info("Combining chunks for the final result...")
@@ -93,5 +106,5 @@ async def generate_file_summary(
         {"role": "system", "content": reduce_prompt},
         {"role": "user", "content": combined_text},
     ]
-    async for token in stream_llm(reduce_messages, app_name):
+    async for token in stream_llm(reduce_messages, app_name, extra=extra):
         yield token

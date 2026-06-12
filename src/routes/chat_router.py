@@ -28,9 +28,13 @@ async def file_summary_endpoint(
     file: UploadFile = File(...),
     task: str = Form(default="Summarize the key points of this document."),
     tone: str = Form(default="Professional and objective"),
+    stream: bool = Form(default=True, description="Stream tokens as text/event-stream, or return one buffered JSON body."),
+    response_format: str = Form(default="text", pattern=r"^(text|json)$", description="LLM content format: 'text' or 'json'."),
     app_name: str = Depends(verify_api_key)
 ):
-    return await handle_file_summary(file=file, task=task, tone=tone, app_name=app_name)
+    return await handle_file_summary(
+        file=file, task=task, tone=tone, app_name=app_name, stream=stream, response_format=response_format,
+    )
 
 
 @router.get("/chat/sessions/active")

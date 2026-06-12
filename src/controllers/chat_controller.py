@@ -5,38 +5,50 @@ from src.utils.file_parser import extract_text_from_file, MAX_FILE_SIZE
 from src.services.chat_service import generate_chat_stream, generate_file_summary
 from src.utils.store.sessions import delete_session, get_all_active_sessions, get_session_history
 from src.utils.system.logger import logger
-from src.utils.system.streaming import SlotReleasingStreamingResponse
+from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json
 from src.utils.concurrency import GPUBusyError, acquire_gpu_slot
 
 
-async def handle_chat(request: ChatRequest, app_name: str) -> StreamingResponse:
+async def handle_chat(request: ChatRequest, app_name: str) -> StreamingResponse | dict:
     try:
         slot = await acquire_gpu_slot()
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    # The response wrapper owns the slot and releases it whether the stream
-    # completes, errors, or the client disconnects before it even starts. If
-    # anything fails before the wrapper takes over, release here.
+    reply = generate_chat_stream(
+        app_name=app_name,
+        prompt=request.prompt,
+        system_prompt=request.system_prompt,
+        session_id=request.session_id,
+        response_format=request.response_format,
+    )
+
+    # The streaming wrapper owns the slot and releases it whether the stream
+    # completes, errors, or the client disconnects before it even starts. The
+    # buffered path drains the same generator and must release the slot itself.
+    # If anything fails before either takes over, release here.
     try:
-        logger.info(f"Received chat request for app: {app_name}, session: {request.session_id}")
-        return SlotReleasingStreamingResponse(
-            generate_chat_stream(
-                app_name=app_name,
-                prompt=request.prompt,
-                system_prompt=request.system_prompt,
-                session_id=request.session_id,
-                response_format=request.response_format,
-            ),
-            slot=slot,
-            media_type="text/event-stream",
-        )
+        if request.stream:
+            logger.info(f"Received chat request for app: {app_name}, session: {request.session_id}")
+            return SlotReleasingStreamingResponse(reply, slot=slot, media_type="text/event-stream")
+        logger.info(f"Received buffered chat request for app: {app_name}, session: {request.session_id}")
+        try:
+            return await drain_to_json(reply)
+        finally:
+            await slot.release()
     except Exception:
         await slot.release()
         raise
 
 
-async def handle_file_summary(file: UploadFile, task: str, tone: str, app_name: str) -> StreamingResponse:
+async def handle_file_summary(
+    file: UploadFile,
+    task: str,
+    tone: str,
+    app_name: str,
+    stream: bool = True,
+    response_format: str = "text",
+) -> StreamingResponse | dict:
     if not file.filename:
         logger.warning("Received file summary request without a file.")
         raise HTTPException(status_code=400, detail="No file uploaded.")
@@ -57,23 +69,37 @@ async def handle_file_summary(file: UploadFile, task: str, tone: str, app_name: 
 
     # generate_file_summary manages its own GPU slots per LLM call via the shared
     # runner, so we must NOT pre-acquire a slot here (doing so would deadlock
-    # under concurrency). If every slot stays busy past the timeout, surface it
-    # as an in-stream error since the response has already started.
-    async def _with_file_header():
+    # under concurrency).
+    async def _summary_with_header():
         yield f"[FILE:{filename}]\n"
+        async for token in generate_file_summary(
+            document_text=document_text,
+            task=task,
+            tone=tone,
+            app_name=app_name,
+            response_format=response_format,
+        ):
+            yield token
+
+    # Buffered mode hasn't sent headers yet, so an exhausted-GPU error can be a
+    # real 503. The streaming response has already started, so the same failure
+    # can only be surfaced as an in-stream error marker.
+    if not stream:
+        logger.info(f"Buffering file summary for app: {app_name}, file: {filename}")
         try:
-            async for token in generate_file_summary(
-                document_text=document_text,
-                task=task,
-                tone=tone,
-                app_name=app_name,
-            ):
-                yield token
+            return await drain_to_json(_summary_with_header())
+        except GPUBusyError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    async def _guarded():
+        try:
+            async for piece in _summary_with_header():
+                yield piece
         except GPUBusyError as e:
             yield f"[ERROR:{e}]\n"
 
     logger.info(f"Streaming file summary for app: {app_name}, file: {filename}")
-    return StreamingResponse(_with_file_header(), media_type="text/event-stream")
+    return StreamingResponse(_guarded(), media_type="text/event-stream")
 
 
 async def handle_fetch_history(session_id: str, app_name: str) -> dict:

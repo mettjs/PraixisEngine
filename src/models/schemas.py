@@ -5,6 +5,7 @@ class ChatRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     system_prompt: str | None = None
     session_id: str | None = None
+    stream: bool = True
     response_format: Literal["text", "json"] = "text"
 
 class QuestionRequest(BaseModel):
@@ -14,6 +15,8 @@ class QuestionRequest(BaseModel):
     n_results: int = Field(default=5, ge=1, le=20)
     system_prompt: str | None = None
     metadata_filter: dict | None = None
+    stream: bool = True
+    response_format: Literal["text", "json"] = "text"
 
 class EmbedRequest(BaseModel):
     text: str = Field(..., min_length=1)
@@ -22,3 +25,5 @@ class CompareRequest(BaseModel):
     collection_name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$")
     file_1: str = Field(..., min_length=1)
     file_2: str = Field(..., min_length=1)
+    stream: bool = False
+    response_format: Literal["text", "json"] = "text"
