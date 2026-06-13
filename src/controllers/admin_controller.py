@@ -154,11 +154,21 @@ async def admin_delete_collection(app_name: str, collection_name: str) -> dict:
 
 
 async def admin_vector_search(app_name: str, collection_name: str, query: str, n_results: int = 5) -> dict:
+    store = get_vector_store()
     try:
-        results = await get_vector_store().search(
+        results = await store.search(
             collection_name=collection_name, app_name=app_name, query=query, n_results=n_results
         )
-        return {"query": query, "app_name": app_name, "collection_name": collection_name, "results": results}
+        # The score scale differs by backend: hybrid (pgvector) returns small RRF
+        # scores, non-hybrid (chroma) returns a 0–1 similarity. Tell the UI which
+        # so it can colour the score badge against the right thresholds.
+        return {
+            "query": query,
+            "app_name": app_name,
+            "collection_name": collection_name,
+            "results": results,
+            "score_type": "rrf" if store.supports_hybrid else "similarity",
+        }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

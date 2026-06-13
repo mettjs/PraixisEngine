@@ -32,6 +32,14 @@
   font-family: ui-monospace, monospace;
 }
 
+/* `.th` hardcodes left alignment, which collides at equal specificity with the
+   `text-right`/`text-center` utilities used on numeric headers — leaving the
+   header left-aligned while its `.td` column is right-aligned (visibly
+   misaligned). These higher-specificity rules let the utility win so headers
+   line up with their cells. */
+.th.text-right  { text-align: right; }
+.th.text-center { text-align: center; }
+
 .td {
   padding: 0.75rem 1rem;
   font-size: 0.875rem;

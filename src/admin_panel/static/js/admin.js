@@ -63,6 +63,7 @@ function adminApp() {
       loading:    false,
       done:       false,
       results:    [],
+      scoreType:  'rrf',
       expanded:   {},
     },
 
@@ -166,7 +167,7 @@ function adminApp() {
       this.vectorExpanded     = null;
       this.vectorFiles        = {};
       this.vectorFilesLoading = {};
-      this.vectorSearch       = { query: '', appName: '', collection: '', nResults: 5, loading: false, done: false, results: [], expanded: {} };
+      this.vectorSearch       = { query: '', appName: '', collection: '', nResults: 5, loading: false, done: false, results: [], scoreType: 'rrf', expanded: {} };
       this.stopAutoRefresh();
     },
 

@@ -134,7 +134,10 @@ function _adminVector() {
           n_results:       nResults,
         });
         if (r.ok) {
-          this.vectorSearch.results = (await r.json()).results || [];
+          const d = await r.json();
+          this.vectorSearch.results   = d.results || [];
+          // 'rrf' (pgvector hybrid) or 'similarity' (chroma); drives scoreColor.
+          this.vectorSearch.scoreType = d.score_type || 'rrf';
         } else {
           const d = await r.json().catch(() => ({}));
           this.showToast(d.detail || 'Search failed.', 'error');
@@ -147,13 +150,22 @@ function _adminVector() {
       }
     },
 
-    // RRF score = 1/(60+rank_sem) + 1/(60+rank_fts). Max ≈ 2/61 ≈ 0.0328 when a
-    // chunk ranks #1 in both. ~0.0164 when it tops only one source. Thresholds
-    // are calibrated against those endpoints, not cosine similarity.
+    // Score scale depends on the active backend, so thresholds are per type:
+    //  - 'rrf' (pgvector hybrid): 1/(60+rank_sem) + 1/(60+rank_fts). Max ≈ 2/61
+    //    ≈ 0.0328 when a chunk ranks #1 in both, ~0.0164 when it tops only one.
+    //  - 'similarity' (chroma): 1/(1+cosine_distance), roughly 0.33–1.0.
     scoreColor(score) {
-      if (score >= 0.025) return 'bg-green-400/15 text-green-400 ring-green-500/20';
-      if (score >= 0.012) return 'bg-amber-400/15 text-amber-400 ring-amber-500/20';
-      return 'bg-red-400/15 text-red-400 ring-red-500/20';
+      const green = 'bg-green-400/15 text-green-400 ring-green-500/20';
+      const amber = 'bg-amber-400/15 text-amber-400 ring-amber-500/20';
+      const red   = 'bg-red-400/15 text-red-400 ring-red-500/20';
+      if (this.vectorSearch.scoreType === 'similarity') {
+        if (score >= 0.6)  return green;
+        if (score >= 0.45) return amber;
+        return red;
+      }
+      if (score >= 0.025) return green;
+      if (score >= 0.012) return amber;
+      return red;
     },
 
   };
