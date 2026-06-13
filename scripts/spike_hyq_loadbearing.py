@@ -5,11 +5,12 @@ Run: PYTHONPATH=. uv run python scripts/spike_hyq_loadbearing.py
 """
 import asyncio
 
-from src.utils.vectordb.pool import init_db, get_pool, close_db
-from src.utils.vectordb.ingestion import add_file_to_rag_db
-from src.utils.vectordb.constants import DELETE_FILE, QUESTION_SEARCH, HYBRID_SEARCH
+from src.utils.vectordb.pg.pool import init_db, get_pool, close_db
+from src.utils.vectordb.pg.ingestion import add_file_to_rag_db
+from src.utils.vectordb.pg.constants import DELETE_FILE, QUESTION_SEARCH, HYBRID_SEARCH
 from src.utils.vectordb import questions as Q
-from src.utils.vectordb import retrieval as R
+from src.utils.vectordb.pg import retrieval as R
+from src.utils.vectordb.fusion import rrf_fuse
 from src.utils.vectordb.embeddings import embed
 
 # A corpus of distinct articles so a target can genuinely rank outside top-n.
@@ -83,7 +84,7 @@ async def main() -> None:
         qs = await p.fetch(QUESTION_SEARCH, emb, app, col, pool_n, None, pool_n)
         hl = [(r["source"], r["chunk_index"]) for r in hy]
         ql = [(r["source"], r["chunk_index"]) for r in qs]
-        fused = R._rrf_fuse([hl, ql], pool_n)
+        fused = rrf_fuse([hl, ql], pool_n)
 
         h_rank = rank_of(TARGET_INDEX, hl)          # hybrid-only (HQ off)
         f_rank = rank_of(TARGET_INDEX, fused)        # fused (HQ on)

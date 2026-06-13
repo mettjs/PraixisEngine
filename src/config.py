@@ -53,7 +53,11 @@ HQ_GPU_CONCURRENCY: int = int(os.getenv("HQ_GPU_CONCURRENCY", "1"))
 HQ_GPU_WAIT_TIMEOUT: float = float(os.getenv("HQ_GPU_WAIT_TIMEOUT", "300"))
 
 # --- Vector store ---
+# 'pgvector' (Postgres: hybrid dense+FTS retrieval, FK-backed question index)
+# or 'chroma' (embedded ChromaDB: no extra database to run, pure vector search).
+VECTOR_BACKEND: str = os.getenv("VECTOR_BACKEND", "pgvector").strip().lower()
 POSTGRES_URL: str = os.getenv("POSTGRES_URL", "postgresql://praixis:praixis@localhost:5432/praixis")
+CHROMA_PATH: str = os.getenv("CHROMA_PATH", os.path.join(_ROOT, "chroma_data"))
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 EMBEDDING_DIMS: int = int(os.getenv("EMBEDDING_DIMS", "384"))
 

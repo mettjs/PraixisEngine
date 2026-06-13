@@ -1,7 +1,7 @@
 from typing import Any
 
-from src.utils.vectordb.pool import get_pool
-from src.utils.vectordb.constants import (
+from src.utils.vectordb.pg.pool import get_pool
+from src.utils.vectordb.pg.constants import (
     ALL_COLLECTIONS_ADMIN,
     VECTOR_STATS,
     LIST_COLLECTIONS,

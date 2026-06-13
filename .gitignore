@@ -14,4 +14,10 @@ SECURITY_TODO.md
 
 logs/
 
+# Embedded Chroma backend data (VECTOR_BACKEND=chroma)
+chroma_data/
+
+# Local working notes (review companion, not part of the repo)
+NOTES.md
+
 .vscode

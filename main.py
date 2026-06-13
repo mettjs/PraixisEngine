@@ -16,17 +16,18 @@ from src.routes.ui_router import STATIC_DIR
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from src.utils.concurrency import init_gpu
-    from src.utils.vectordb.pool import init_db, close_db
+    from src.utils.vectordb import get_vector_store
+    store = get_vector_store()  # resolves VECTOR_BACKEND (pgvector | chroma)
     await init_gpu()
-    await init_db()
+    await store.init()
     yield
-    await close_db()
+    await store.close()
 
 
 app = FastAPI(
     title="Praixis - Business logic based API",
     description="Custom decoupled business logic API powered by a local OpenAI-compatible LLM.",
-    version="1.2.2",
+    version="2.0.0",
     docs_url="/swagger/docs",
     redoc_url="/docs",
     lifespan=lifespan,

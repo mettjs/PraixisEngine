@@ -6,6 +6,10 @@ services:
     env_file: .env
     volumes:
       - ./logs:/app/logs
+      # Embedded Chroma data (only written when VECTOR_BACKEND=chroma; the
+      # default CHROMA_PATH resolves to /app/chroma_data inside the container).
+      # Must be a volume, or vector data dies with every image rebuild.
+      - chroma_data:/app/chroma_data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/system/ping', timeout=3)"]
@@ -13,3 +17,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 45s
+
+volumes:
+  chroma_data:

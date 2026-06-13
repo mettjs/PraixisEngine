@@ -5,8 +5,8 @@
 - Python 3.13+
 - [uv](https://github.com/astral-sh/uv) — package manager
 - A running Redis instance (local, [Upstash](https://upstash.com/), or dedicated server)
-- PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension (or use the bundled Docker Postgres service)
 - An OpenAI-compatible LLM server ([Ollama](https://ollama.com/), LiteLLM, LM Studio, vLLM, etc.)
+- **Only for the default `pgvector` vector backend:** PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension (or use the bundled Docker Postgres service). Set `VECTOR_BACKEND=chroma` to use embedded ChromaDB instead — no extra database needed. See [README → Vector Store Backends](README.md#vector-store-backends)
 
 ---
 
@@ -53,8 +53,11 @@ REDIS_URL=redis://localhost:6379/0
 SESSION_TTL=86400       # seconds — default 24 hours
 MAX_HISTORY_PAIRS=20    # user+assistant turns kept before oldest are trimmed
 
-# PostgreSQL (pgvector)
+# Vector store — pgvector (default, hybrid retrieval, needs Postgres)
+# or chroma (embedded, zero infrastructure, pure vector search)
+VECTOR_BACKEND=pgvector
 POSTGRES_URL=postgresql://praixis:yourpassword@localhost:5432/praixis
+# CHROMA_PATH=./chroma_data   # only used when VECTOR_BACKEND=chroma
 
 # Admin panel credentials
 ADMIN_USERNAME=your_admin_username
@@ -88,9 +91,9 @@ uv run uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
 ## Running with Docker
 
-Make sure Docker is running. The project includes a `Makefile` with two modes. `make` is built-in on macOS/Linux. On Windows, install it via [Chocolatey](https://chocolatey.org/) (`choco install make`) or use the manual commands shown below instead.
+Make sure Docker is running. The project includes a `Makefile` with three modes. `make` is built-in on macOS/Linux. On Windows, install it via [Chocolatey](https://chocolatey.org/) (`choco install make`) or use the manual commands shown below instead.
 
-In both modes the API initializes the database schema on startup (creates the `vector` and `unaccent` extensions and the `chunks` and `chunk_questions` tables if they don't exist), so a fresh Postgres just works.
+In both modes the API initializes the vector store on startup — with the default `pgvector` backend it creates the `vector` and `unaccent` extensions and the `chunks` and `chunk_questions` tables if they don't exist, so a fresh Postgres just works. (With `VECTOR_BACKEND=chroma` there is no Postgres to set up at all; data persists under `CHROMA_PATH`.)
 
 ### Local stack — app + PostgreSQL + Redis in Docker
 
@@ -101,6 +104,16 @@ make up-local
 ```
 
 `REDIS_URL` and `POSTGRES_URL` are auto-overridden to point at the bundled containers, so you can leave them unset in `.env` for this mode. Local Postgres credentials are hardcoded to `praixis/praixis` and Postgres/Redis are exposed on the host at `5432`/`6379` for local debugging.
+
+### Chroma stack — app + Redis in Docker, no Postgres
+
+The smallest self-contained deployment: the embedded Chroma vector backend replaces Postgres entirely. Docker boots the app and a Redis container; vector data persists in the `chroma_data` named volume.
+
+```bash
+make up-chroma
+```
+
+`VECTOR_BACKEND` and `REDIS_URL` are auto-overridden for this mode, so the only things your `.env` must provide are the LLM settings and admin credentials.
 
 ### App-only — bring your own Redis + Postgres
 
@@ -127,8 +140,9 @@ docker compose up --build --build-arg EMBEDDING_MODEL=your-model-name
 ### Tear down
 
 ```bash
-make down        # matches make up
-make down-local  # matches make up-local
+make down         # matches make up
+make down-local   # matches make up-local
+make down-chroma  # matches make up-chroma
 ```
 
 ### Manual commands (without make)
@@ -136,6 +150,9 @@ make down-local  # matches make up-local
 ```bash
 # Local stack (API + Postgres + Redis)
 docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+
+# Chroma stack (API + Redis, embedded vector store)
+docker compose -f docker-compose.yml -f docker-compose.chroma.yml up --build
 
 # App only (you provide REDIS_URL + POSTGRES_URL in .env)
 docker compose up --build

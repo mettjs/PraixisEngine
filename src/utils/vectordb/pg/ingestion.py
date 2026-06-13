@@ -1,10 +1,10 @@
 import asyncio
 import uuid
 
-from src.utils.vectordb.pool import get_pool
+from src.utils.vectordb.pg.pool import get_pool
 from src.utils.vectordb.embeddings import embed
 from src.utils.vectordb.chunking import character_chunk, semantic_chunk
-from src.utils.vectordb.constants import DELETE_FILE, INSERT_CHUNK
+from src.utils.vectordb.pg.constants import DELETE_FILE, INSERT_CHUNK
 
 
 async def add_file_to_rag_db(

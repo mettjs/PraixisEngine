@@ -1,10 +1,15 @@
 """Hypothetical-question generation for the question index.
 
 For each stored chunk, an LLM produces a handful of questions a non-expert would
-ask that the chunk answers. Those questions are embedded and written to
-``chunk_questions``. At query time the user's question is matched against these
-(question-to-question, same register) instead of against the formal source text,
-closing the genre gap. See ``constants.CREATE_QUESTIONS_SCHEMA``.
+ask that the chunk answers. Those questions are embedded and handed to the active
+backend's ``store_questions`` (pgvector: ``chunk_questions`` table; Chroma: a
+parallel questions collection). At query time the user's question is matched
+against these (question-to-question, same register) instead of against the formal
+source text, closing the genre gap.
+
+Generation and scheduling are fully backend-agnostic; only storage and
+question-search live behind the :class:`~src.utils.vectordb.base.VectorStore`
+interface.
 
 This module is best-effort by design: it runs in a deferred background pass, so a
 single chunk that fails generation is logged and skipped rather than aborting the
@@ -12,9 +17,6 @@ whole file (unlike ``llm_runner.map_calls``, which cancels the batch on any erro
 """
 import asyncio
 import re
-import uuid
-
-import asyncpg
 
 from src.config import (
     HQ_ENABLED as _HQ_ENABLED,
@@ -23,9 +25,9 @@ from src.config import (
 )
 from src.services.llm_runner import call_llm
 from src.utils.concurrency import hq_gpu_slot
+from src.utils.vectordb import get_vector_store
+from src.utils.vectordb.base import StaleChunksError
 from src.utils.vectordb.embeddings import embed
-from src.utils.vectordb.pool import get_pool
-from src.utils.vectordb.constants import INSERT_QUESTION
 from src.utils.system.logger import logger
 
 # Bound in-process generation to the size of the reserved GPU pool so we don't
@@ -141,26 +143,13 @@ async def generate_and_store_questions(
 
     embeddings = await asyncio.to_thread(embed, [q for _, q in pairs])
 
-    rows = [
-        (
-            uuid.uuid4().hex,
-            app_name,
-            collection_name,
-            source,
-            chunk["id"],
-            chunk["chunk_index"],
-            q,
-            emb,
-        )
-        for (chunk, q), emb in zip(pairs, embeddings)
-    ]
-
-    await get_pool().executemany(INSERT_QUESTION, rows)
+    entries = [(chunk, q, emb) for (chunk, q), emb in zip(pairs, embeddings)]
+    await get_vector_store().store_questions(app_name, collection_name, source, entries)
     logger.info(
-        f"Stored {len(rows)} hypothetical questions for '{source}' "
+        f"Stored {len(entries)} hypothetical questions for '{source}' "
         f"(app={app_name}, collection={collection_name})."
     )
-    return len(rows)
+    return len(entries)
 
 
 # Strong references to in-flight background tasks. asyncio only holds a weak
@@ -173,7 +162,7 @@ async def _run_generation(app_name: str, collection_name: str, source: str, chun
     """Background wrapper: best-effort, never raises into the event loop."""
     try:
         await generate_and_store_questions(app_name, collection_name, source, chunks)
-    except asyncpg.ForeignKeyViolationError:
+    except StaleChunksError:
         # The file was deleted or re-uploaded while we were generating, so the
         # parent chunks these questions point to no longer exist. The newer
         # upload will regenerate; nothing to recover here.
@@ -196,7 +185,7 @@ def schedule_question_generation(
     Returns immediately; generation runs on the event loop without blocking the
     upload response. A no-op when HQ_ENABLED is false or there is nothing to do.
     """
-    if not _HQ_ENABLED or not chunks:
+    if not _HQ_ENABLED or not chunks or not get_vector_store().supports_questions:
         return
     task = asyncio.create_task(_run_generation(app_name, collection_name, source, chunks))
     _background_tasks.add(task)

@@ -1,0 +1,31 @@
+# Overlay: self-contained stack on the embedded Chroma backend — app + Redis,
+# no Postgres at all. Vector data persists in the chroma_data volume declared
+# in the base compose file.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.chroma.yml up --build
+#   (or: make up-chroma)
+services:
+  api:
+    environment:
+      - VECTOR_BACKEND=chroma
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  redis_data:

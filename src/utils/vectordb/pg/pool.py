@@ -4,7 +4,7 @@ import asyncpg
 from pgvector.asyncpg import register_vector
 
 from src.config import POSTGRES_URL as _POSTGRES_URL, EMBEDDING_DIMS as _EMBEDDING_DIMS
-from src.utils.vectordb.constants import (
+from src.utils.vectordb.pg.constants import (
     CREATE_EXTENSION,
     CREATE_UNACCENT,
     CREATE_SCHEMA,

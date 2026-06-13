@@ -34,7 +34,8 @@ pip install "praixis[async]"
 ## Features
 
 - **Stateful Chat** — Persistent, session-based conversations stored in Redis with configurable TTL and automatic context-window trimming
-- **RAG (Retrieval-Augmented Generation)** — Upload documents into named vector collections (single or batch) and ask grounded questions with source attribution; supports metadata filters and custom chunk sizes. Retrieval is hybrid: dense vector similarity fused with full-text keyword search via Reciprocal Rank Fusion
+- **RAG (Retrieval-Augmented Generation)** — Upload documents into named vector collections (single or batch) and ask grounded questions with source attribution; supports metadata filters and custom chunk sizes. On the pgvector backend retrieval is hybrid: dense vector similarity fused with full-text keyword search via Reciprocal Rank Fusion
+- **Pluggable Vector Store** — One `VECTOR_BACKEND` setting selects the retrieval backend: **pgvector** (PostgreSQL: hybrid dense + full-text search, the default) or **chroma** (embedded ChromaDB: zero extra infrastructure, pure vector search). Both share the same embeddings, chunking, API surface, and Improved Search; see [Vector Store Backends](#vector-store-backends)
 - **Improved Search (Hypothetical-Question Indexing)** — Opt-in per upload (`improved_search=true`). After a document is stored, an LLM generates the natural-language questions each chunk answers; those questions are embedded and indexed so plain, conversational queries match better against formal or technical source text (closing the "genre gap" between how people ask and how documents are written). Generation runs in the background on a **dedicated GPU pool** so it never competes with live chat/RAG traffic; the document is searchable immediately and question matching improves once generation finishes
 - **File Processing** — Summarize or run custom tasks on uploaded PDFs, DOCX, and TXT files using a map-reduce pipeline with real-time streaming progress events
 - **Multi-tenancy** — API key authentication with full data isolation between apps; each app only sees its own sessions and collections
@@ -44,7 +45,7 @@ pip install "praixis[async]"
 - **Rate Limiting** — Per-API-key, per-endpoint request limits to protect GPU resources (falls back to IP for unauthenticated routes)
 - **Redis-backed GPU Concurrency** — Global token buckets in Redis (BLPOP/RPUSH) enforce concurrency across all workers and container replicas. Two independent pools: a shared `GPU_CONCURRENCY` pool for interactive calls (requests block up to `GPU_WAIT_TIMEOUT` seconds, default 30 s, then return `503`) and a separate `HQ_GPU_CONCURRENCY` pool reserved for background question generation so it never starves live traffic
 - **Usage Tracking** — Per-app prompt/completion token counters in Redis, exposed via admin endpoints
-- **Async I/O** — Fully async stack: `redis.asyncio`, `AsyncOpenAI`, `asyncpg` for PostgreSQL/pgvector
+- **Async I/O** — Fully async stack: `redis.asyncio`, `AsyncOpenAI`, `asyncpg` for PostgreSQL/pgvector (Chroma's sync client is isolated in worker threads)
 - **Structured Output** — Optional `response_format: "json"` field on chat requests for machine-readable responses
 - **Embeddings** — Direct embedding endpoint returns the raw vector for any text input using the same multilingual model (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384 dimensions) the RAG pipeline uses internally; model is configurable via `EMBEDDING_MODEL` (must be paired with `EMBEDDING_DIMS` set to the model's output dimension — startup validates the pair and fails fast if they disagree)
 
@@ -76,7 +77,7 @@ Client App (with X-API-Key)
   |           Utilities                 |
   |  ai_client.py    (OpenAI-compatible)|  <- LLM backend connection
   |  store/          (Redis)            |  <- Client, sessions, usage, keys, audit
-  |  vectordb/       (pgvector)           |  <- Vector store + embeddings
+  |  vectordb/  (pgvector | chroma)     |  <- Vector store + embeddings
   |  concurrency.py                     |  <- Redis GPU slot counter
   |  system/                            |  <- logger, limiter, .env loader
   └────────────────────────────────────┘
@@ -92,10 +93,10 @@ Client App (with X-API-Key)
 
 ### Request Flow — RAG Q&A
 
-1. Client uploads a file via `POST /rag-db/upload` → text is extracted and stored in pgvector, scoped by `(app, collection)` columns in the `chunks` table. If `improved_search=true`, hypothetical questions are generated in the background and indexed in the `chunk_questions` table, each linked back to its parent chunk
+1. Client uploads a file via `POST /rag-db/upload` → text is extracted and stored in the active vector backend, scoped by app and collection. If `improved_search=true`, hypothetical questions are generated in the background and indexed alongside (pgvector: `chunk_questions` table; Chroma: a parallel questions collection), each linked back to its parent chunk
 2. Client sends `POST /rag-db/ask` with a question, `collection_name`, and optional `n_results`
 3. If a prior session exists, the question is **reformulated** into a standalone query using chat history
-4. Candidates are retrieved by hybrid search (dense + keyword) over the source text and — when a question index exists — by dense search over the generated questions (matched parent chunk to parent chunk); both ranked lists are fused with Reciprocal Rank Fusion, de-duplicated to one entry per chunk, then the top-N are injected as context
+4. Candidates are retrieved over the source text (hybrid dense + keyword on pgvector; dense on Chroma) and — when a question index exists — by dense search over the generated questions (de-duplicated to the parent chunk); the ranked lists are fused with Reciprocal Rank Fusion, then the top-N are window-expanded and injected as context
 5. Response is streamed back: metadata headers (`SESSION_ID`, `SEARCH_QUERY`, `SOURCES`) first, then answer tokens; full answer is saved to the session
 
 ### Large Document Pipeline (Map-Reduce)
@@ -111,15 +112,39 @@ Document
 
 ---
 
+## Vector Store Backends
+
+The retrieval backend is selected once per deployment with `VECTOR_BACKEND`; everything else (API surface, embeddings, chunking, Improved Search, admin panel) is identical.
+
+| | `pgvector` (default) | `chroma` |
+|---|---|---|
+| Storage | PostgreSQL + [pgvector](https://github.com/pgvector/pgvector) | Embedded [ChromaDB](https://www.trychroma.com/), persisted to `CHROMA_PATH` |
+| Extra infrastructure | A Postgres server | None |
+| Document search | **Hybrid**: dense vectors + full-text keyword search fused with RRF | Dense vectors only |
+| Improved Search (question index) | Yes (`chunk_questions` table, FK-cascaded) | Yes (parallel questions collection) |
+| Best for | Production: better retrieval on keyword-ish queries (names, article numbers, codes) | Getting started, small single-node deployments |
+| Docker mode | `make up-local` (bundled Postgres + Redis) | `make up-chroma` (bundled Redis only) |
+
+Pick the backend before uploading documents — the two stores do not share data, and there is no migration tool between them. Switching `VECTOR_BACKEND` on an existing deployment means re-uploading your collections.
+
+```env
+VECTOR_BACKEND=pgvector   # or: chroma
+POSTGRES_URL=postgresql://praixis:yourpassword@localhost:5432/praixis  # pgvector only
+CHROMA_PATH=./chroma_data                                              # chroma only
+```
+
+---
+
 ## Project Structure
 
 ```
 PraixisEngine/
 ├── main.py                    # App entry point, FastAPI setup, lifespan, rate limit handler
-├── Makefile                   # Docker shortcuts (up, up-local, down, down-local)
+├── Makefile                   # Docker shortcuts (up, up-local, up-chroma + matching down-*)
 ├── Dockerfile
 ├── docker-compose.yml         # App-only — bring your own Redis + Postgres
 ├── docker-compose.local.yml   # Overlay: adds bundled Postgres + Redis for local dev
+├── docker-compose.chroma.yml  # Overlay: bundled Redis + embedded Chroma — no Postgres
 ├── tailwind.config.js         # Tailwind build config (brand colors, content paths)
 ├── pyproject.toml
 └── src/
@@ -165,15 +190,26 @@ PraixisEngine/
         ├── system/            # Cross-cutting infrastructure
         │   ├── logger.py
         │   └── limiter.py     # SlowAPI rate limiter
-        └── vectordb/          # pgvector connection, ingest, and retrieval
-            ├── constants.py   # All SQL query strings (chunks + chunk_questions schema & queries)
-            ├── pool.py        # asyncpg connection pool lifecycle
-            ├── embeddings.py  # fastembed text embedding
-            ├── chunking.py    # Semantic and character chunking strategies
-            ├── collections.py # Collection & file management
-            ├── ingestion.py   # Chunk & index documents
+        └── vectordb/          # Vector store: shared contract + per-backend packages
+            ├── __init__.py    # Factory: resolves VECTOR_BACKEND to a store singleton
+            ├── base.py        # VectorStore ABC + capability flags (supports_hybrid, supports_questions)
+            ├── embeddings.py  # fastembed text embedding (shared by both backends)
+            ├── chunking.py    # Semantic and character chunking strategies (shared)
+            ├── fusion.py      # RRF rank fusion + context-window merging (shared)
             ├── questions.py   # Hypothetical-question generation (Improved Search), reserved GPU pool
-            └── retrieval.py   # Hybrid (dense + FTS) search fused with question-index search via RRF
+            ├── pg/            # PostgreSQL + pgvector backend
+            │   ├── constants.py   # All SQL (chunks + chunk_questions schema & queries)
+            │   ├── pool.py        # asyncpg connection pool lifecycle
+            │   ├── collections.py # Collection & file management
+            │   ├── ingestion.py   # Chunk & index documents
+            │   ├── retrieval.py   # Hybrid (dense + FTS) search fused with question index via RRF
+            │   └── store.py       # PgVectorStore — VectorStore implementation
+            └── chroma/        # Embedded ChromaDB backend
+                ├── client.py      # Persistent client lifecycle, tenant scoping, ownership checks
+                ├── collections.py # Collection & file management
+                ├── ingestion.py   # Chunk & index documents, question storage
+                ├── retrieval.py   # Dense search fused with question index via RRF
+                └── store.py       # ChromaStore — VectorStore implementation
 ```
 
 ---
@@ -365,9 +401,9 @@ Formal documents (laws, policies, technical manuals) are written in a different 
 
 1. The document is chunked, embedded, and stored as usual — **searchable immediately**.
 2. In the **background**, an LLM reads each chunk and writes the plain-language questions a non-expert would ask that the chunk answers.
-3. Those questions are embedded and indexed in a separate `chunk_questions` table, each pointing back to its parent chunk.
+3. Those questions are embedded and indexed separately (pgvector: `chunk_questions` table; Chroma: a parallel questions collection), each pointing back to its parent chunk.
 
-At query time, the user's question is matched **question-to-question** (same register, much tighter similarity) in addition to the normal hybrid search; the two result sets are fused and de-duplicated to the parent chunk. One chunk surfaced by several of its questions still counts once.
+At query time, the user's question is matched **question-to-question** (same register, much tighter similarity) in addition to the normal document search; the two result sets are fused and de-duplicated to the parent chunk. One chunk surfaced by several of its questions still counts once. This works identically on both vector backends.
 
 **Operational notes:**
 
@@ -417,7 +453,7 @@ All admin endpoints require HTTP Basic Auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD`
 | `GET` | `/api/system/auth/verify` | Validate admin credentials (used by the admin panel login); returns `{"ok": true}` |
 | `GET` | `/api/system/health` | Aggregate health of Redis, vector store, and LLM backend |
 | `GET` | `/api/system/health/redis` | Redis health only |
-| `GET` | `/api/system/health/vectordb` | pgvector health only |
+| `GET` | `/api/system/health/vectordb` | Vector store health only (active backend) |
 | `GET` | `/api/system/health/llm` | LLM backend health only |
 | `GET` | `/api/system/stats` | Active sessions, collection count, total vector chunks |
 | `GET` | `/api/system/keys` | List all provisioned keys (preview + created_at) and their app names |

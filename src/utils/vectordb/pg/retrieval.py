@@ -3,22 +3,25 @@ import re
 from typing import Any
 
 from src.config import HQ_ENABLED as _HQ_ENABLED
-from src.utils.vectordb.pool import get_pool
+from src.utils.vectordb.pg.pool import get_pool
 from src.utils.vectordb.embeddings import embed
-from src.utils.vectordb.constants import (
+from src.utils.vectordb.fusion import (
+    ADMIN_POOL_FACTOR,
+    ADMIN_POOL_MIN,
+    RAG_POOL_FACTOR,
+    RAG_POOL_MIN,
+    group_hits_by_source,
+    merge_windows,
+    rrf_fuse,
+    source_filter,
+)
+from src.utils.vectordb.pg.constants import (
     COLLECTION_EXISTS,
     FULL_DOCUMENT,
     HYBRID_SEARCH,
     QUESTION_SEARCH,
     WINDOW_CHUNKS,
 )
-
-
-def _source_filter(metadata_filter: dict[str, Any] | None) -> str | None:
-    if metadata_filter and isinstance(metadata_filter.get("source"), str):
-        return metadata_filter["source"]
-    return None
-
 
 _WORD_NUM_RE = re.compile(r"\b(\w+)\s+(\d+)\b")
 
@@ -42,65 +45,9 @@ def _fts_query(text: str) -> str:
     return or_terms if or_terms else text
 
 
-_CONTEXT_WINDOW = 1  # neighbor chunks to include on each side of every hit
-
-
-def _merge_windows(chunk_indices: list[int]) -> list[tuple[int, int]]:
-    """Merge window ranges for hits from the same source.
-
-    When two retrieved chunks are close enough that their expanded windows
-    overlap, joining them into one contiguous range avoids sending the shared
-    text to the LLM twice and produces a more readable context block.
-    """
-    sorted_idx = sorted(set(chunk_indices))
-    lo = max(0, sorted_idx[0] - _CONTEXT_WINDOW)
-    hi = sorted_idx[0] + _CONTEXT_WINDOW
-    merged: list[tuple[int, int]] = []
-    for idx in sorted_idx[1:]:
-        new_lo = max(0, idx - _CONTEXT_WINDOW)
-        new_hi = idx + _CONTEXT_WINDOW
-        if new_lo <= hi + 1:
-            hi = max(hi, new_hi)
-        else:
-            merged.append((lo, hi))
-            lo, hi = new_lo, new_hi
-    merged.append((lo, hi))
-    return merged
-
-
 async def _fetch_range(app: str, collection: str, source: str, lo: int, hi: int) -> str:
     rows = await get_pool().fetch(WINDOW_CHUNKS, app, collection, source, lo, hi)
     return "\n\n".join(r["content"] for r in rows)
-
-
-_RRF_K = 60  # rank-fusion damping; matches the constant used inside HYBRID_SEARCH
-
-# Candidate over-fetch before rank fusion. Fusion only works if each ranked
-# list is wider than the final cut, and the RAG path fuses up to three lists
-# (dense, sparse, question index) — so it over-fetches more aggressively than
-# the single-query admin search. The asymmetry is deliberate; don't "fix" one
-# side to match the other.
-_RAG_POOL_FACTOR = 4
-_RAG_POOL_MIN = 40   # sized to exploit the HNSW ef_search ceiling (60)
-_ADMIN_POOL_FACTOR = 3
-_ADMIN_POOL_MIN = 15
-
-
-def _rrf_fuse(
-    ranked_lists: list[list[tuple[str, int]]], limit: int
-) -> list[tuple[str, int]]:
-    """Reciprocal-rank-fuse several ordered (source, chunk_index) lists.
-
-    Each list is already ranked best-first. A key's score is the sum of
-    1/(K + rank) across the lists it appears in, so a chunk surfaced by both the
-    hybrid search and the question search outranks one found by only one path.
-    Returns the top ``limit`` keys.
-    """
-    scores: dict[tuple[str, int], float] = {}
-    for ranked in ranked_lists:
-        for rank, key in enumerate(ranked, start=1):
-            scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
-    return sorted(scores, key=lambda k: scores[k], reverse=True)[:limit]
 
 
 async def query_rag_db(
@@ -111,10 +58,10 @@ async def query_rag_db(
     metadata_filter: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     embedding = await asyncio.to_thread(embed, [question])
-    source_filter = _source_filter(metadata_filter)
+    src_filter = source_filter(metadata_filter)
     # Over-fetch from each search so fusion has a real candidate pool to work
     # with; the final n_results cut happens AFTER fusion, not inside either query.
-    candidate_pool = max(n_results * _RAG_POOL_FACTOR, _RAG_POOL_MIN)
+    candidate_pool = max(n_results * RAG_POOL_FACTOR, RAG_POOL_MIN)
 
     # Hybrid (dense + sparse) over the source text, and — when enabled — a dense
     # search over generated questions, run concurrently. Both return ranked
@@ -124,7 +71,7 @@ async def query_rag_db(
             HYBRID_SEARCH,
             embedding[0], app_name, collection_name,
             candidate_pool, _fts_query(question),
-            source_filter, candidate_pool,
+            src_filter, candidate_pool,
         )
     ]
     if _HQ_ENABLED:
@@ -132,7 +79,7 @@ async def query_rag_db(
             get_pool().fetch(
                 QUESTION_SEARCH,
                 embedding[0], app_name, collection_name,
-                candidate_pool, source_filter, candidate_pool,
+                candidate_pool, src_filter, candidate_pool,
             )
         )
 
@@ -140,18 +87,14 @@ async def query_rag_db(
     ranked_lists = [
         [(r["source"], r["chunk_index"]) for r in rows] for rows in results
     ]
-    fused = _rrf_fuse(ranked_lists, n_results)
+    fused = rrf_fuse(ranked_lists, n_results)
 
     # Group hits by source (dict preserves fused-rank order), then merge
     # overlapping windows so duplicate content is never sent to the LLM.
-    source_hits: dict[str, list[int]] = {}
-    for source, chunk_index in fused:
-        source_hits.setdefault(source, []).append(chunk_index)
-
     fetch_tasks: list = []
     result_sources: list[str] = []
-    for source, indices in source_hits.items():
-        for lo, hi in _merge_windows(indices):
+    for source, indices in group_hits_by_source(fused).items():
+        for lo, hi in merge_windows(indices):
             fetch_tasks.append(_fetch_range(app_name, collection_name, source, lo, hi))
             result_sources.append(source)
 
@@ -173,7 +116,7 @@ async def search_collection(
     rows = await get_pool().fetch(
         HYBRID_SEARCH,
         embedding[0], app_name, collection_name,
-        max(n_results * _ADMIN_POOL_FACTOR, _ADMIN_POOL_MIN), _fts_query(query), None, n_results,
+        max(n_results * ADMIN_POOL_FACTOR, ADMIN_POOL_MIN), _fts_query(query), None, n_results,
     )
     return [
         {"source": r["source"], "text": r["content"], "score": round(float(r["rrf_score"]), 4)}

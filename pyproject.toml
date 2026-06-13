@@ -1,12 +1,13 @@
 [project]
 name = "praixisengine"
-version = "1.2.2"
+version = "2.0.0"
 description = "Multi-tenant AI backend API providing decoupled business logic (chat, RAG, file processing) over an OpenAI-compatible LLM."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "asyncpg>=0.30.0",
     "pgvector>=0.3.6",
+    "chromadb>=1.5.7",
     "python-dotenv>=1.0.0",
     "fastapi>=0.135.3",
     "langchain-text-splitters>=1.1.1",

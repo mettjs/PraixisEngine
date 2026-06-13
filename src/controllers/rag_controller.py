@@ -4,17 +4,9 @@ from fastapi.responses import StreamingResponse
 from src.models.schemas import EmbedRequest, QuestionRequest
 from src.services.rag_service import generate_comparison, generate_rag_answer, generate_summary, reformulate_query
 from src.utils.file_parser import extract_text_from_file, MAX_FILE_SIZE
+from src.utils.vectordb import get_vector_store
 from src.utils.vectordb.embeddings import get_embedding
-from src.utils.vectordb.ingestion import add_file_to_rag_db
 from src.utils.vectordb.questions import schedule_question_generation
-from src.utils.vectordb.collections import (
-    collection_exists,
-    list_all_collections,
-    list_files_in_collection,
-    delete_collection,
-    delete_file_from_collection,
-)
-from src.utils.vectordb.retrieval import query_rag_db, get_full_document_text
 from src.utils.store.sessions import get_session_history
 from src.utils.system.logger import logger
 from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json
@@ -24,7 +16,7 @@ from src.utils.store.audit import log_event
 
 async def handle_list_collections(app_name: str) -> dict:
     try:
-        collections = await list_all_collections(app_name=app_name)
+        collections = await get_vector_store().list_collections(app_name=app_name)
         logger.info(f"Listed collections for app: {app_name}, total_collections: {len(collections)}")
         return {"status": "success", "total_documents": len(collections), "active_collections": collections}
     except Exception as e:
@@ -34,7 +26,7 @@ async def handle_list_collections(app_name: str) -> dict:
 
 async def handle_list_files(collection_name: str, app_name: str) -> dict:
     try:
-        files = await list_files_in_collection(collection_name=collection_name, app_name=app_name)
+        files = await get_vector_store().list_files(collection_name=collection_name, app_name=app_name)
         logger.info(f"Listed files in collection: {collection_name} for app: {app_name}, total_files: {len(files)}")
         return {"status": "success", "collection_name": collection_name, "total_files": len(files), "files_stored": files}
     except ValueError as ve:
@@ -46,7 +38,7 @@ async def handle_list_files(collection_name: str, app_name: str) -> dict:
 
 
 async def handle_delete_collection(collection_name: str, app_name: str) -> dict:
-    success = await delete_collection(collection_name=collection_name, app_name=app_name)
+    success = await get_vector_store().delete_collection(collection_name=collection_name, app_name=app_name)
     if not success:
         logger.warning(f"Collection not found for deletion for app: {app_name}, collection: {collection_name}")
         raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' does not exist or was already deleted.")
@@ -57,7 +49,7 @@ async def handle_delete_collection(collection_name: str, app_name: str) -> dict:
 
 async def handle_delete_file(collection_name: str, filename: str, app_name: str) -> dict:
     try:
-        await delete_file_from_collection(collection_name=collection_name, filename=filename, app_name=app_name)
+        await get_vector_store().delete_file(collection_name=collection_name, filename=filename, app_name=app_name)
         logger.info(f"Deleted file: {filename} from collection: {collection_name} for app: {app_name}")
         await log_event("FILE_DELETED", {"filename": filename, "collection": collection_name}, app_name=app_name)
         return {"status": "success", "message": f"All data for '{filename}' has been permanently removed from '{collection_name}'."}
@@ -95,7 +87,7 @@ async def handle_rag_upload(
             if not document_text.strip():
                 results.append({"filename": file.filename, "status": "error", "detail": "File is empty or unreadable."})
                 continue
-            chunk_rows = await add_file_to_rag_db(
+            chunk_rows = await get_vector_store().add_file(
                 text=document_text,
                 collection_name=collection_name,
                 filename=file.filename,
@@ -129,13 +121,13 @@ async def handle_rag_upload(
 async def handle_rag_question(request: QuestionRequest, app_name: str) -> StreamingResponse:
     # Check the collection before any LLM work, so a typo'd name is a clean 404
     # instead of a burned reformulation call and a streamed non-answer.
-    if not await collection_exists(collection_name=request.collection_name, app_name=app_name):
+    if not await get_vector_store().collection_exists(collection_name=request.collection_name, app_name=app_name):
         raise HTTPException(status_code=404, detail=f"Collection '{request.collection_name}' does not exist.")
 
     try:
         history = await get_session_history(session_id=request.session_id, app_name=app_name) if request.session_id else []
         search_query = await reformulate_query(history, request.question, app_name=app_name)
-        relevant_chunks = await query_rag_db(
+        relevant_chunks = await get_vector_store().query(
             collection_name=request.collection_name,
             app_name=app_name,
             question=search_query,
@@ -194,7 +186,7 @@ async def handle_summarize_document(
     collection_name: str, filename: str, app_name: str, stream: bool = False, response_format: str = "text"
 ) -> StreamingResponse | dict:
     try:
-        document_text = await get_full_document_text(collection_name=collection_name, app_name=app_name, filename=filename)
+        document_text = await get_vector_store().full_document(collection_name=collection_name, app_name=app_name, filename=filename)
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
@@ -234,9 +226,10 @@ async def handle_compare_documents(
     collection_name: str, file_1: str, file_2: str, app_name: str, stream: bool = False, response_format: str = "text"
 ) -> StreamingResponse | dict:
     try:
+        store = get_vector_store()
         doc1_text, doc2_text = await asyncio.gather(
-            get_full_document_text(collection_name=collection_name, app_name=app_name, filename=file_1),
-            get_full_document_text(collection_name=collection_name, app_name=app_name, filename=file_2),
+            store.full_document(collection_name=collection_name, app_name=app_name, filename=file_1),
+            store.full_document(collection_name=collection_name, app_name=app_name, filename=file_2),
         )
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))

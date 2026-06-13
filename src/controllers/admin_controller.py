@@ -5,15 +5,7 @@ from src.utils.store.client import redis_client
 from src.utils.store.sessions import delete_all_app_sessions
 from src.utils.store.usage import get_usage, get_all_app_names
 from src.utils.store.api_keys import store_api_key, remove_api_key_by_hash, list_all_api_keys
-from src.utils.vectordb.pool import ping as _vector_ping
-from src.utils.vectordb.collections import (
-    get_all_collections_admin as _get_all_collections_admin,
-    get_vector_stats as _get_vector_stats,
-    list_files_in_collection as _list_collection_files,
-    delete_collection as _delete_collection,
-    delete_file_from_collection as _delete_file,
-)
-from src.utils.vectordb.retrieval import search_collection as _search_collection
+from src.utils.vectordb import get_vector_store
 from src.utils.ai_client import get_async_ai_client
 from src.utils.concurrency import get_gpu_status, reset_gpu_counter
 from src.utils.store.audit import log_event, get_audit_log
@@ -34,7 +26,7 @@ async def get_redis_health() -> dict:
 
 async def get_vectordb_health() -> dict:
     try:
-        await _vector_ping()
+        await get_vector_store().ping()
         return {"status": "online"}
     except Exception:
         logger.error("Vector DB health check failed.")
@@ -66,7 +58,7 @@ async def get_system_stats() -> dict:
 
     active_sessions, (num_collections, total_vectors) = await asyncio.gather(
         _count_sessions(),
-        _get_vector_stats(),
+        get_vector_store().stats(),
     )
     return {
         "active_chat_sessions": active_sessions,
@@ -139,21 +131,21 @@ async def get_app_audit(app_name: str, limit: int = 100, offset: int = 0) -> dic
 # ── Vector DB admin ───────────────────────────────────────────────────────────
 
 async def admin_list_all_collections() -> dict:
-    collections = await _get_all_collections_admin()
+    collections = await get_vector_store().all_collections_with_counts()
     total_chunks = sum(c["chunk_count"] for c in collections)
     return {"total_collections": len(collections), "total_chunks": total_chunks, "collections": collections}
 
 
 async def admin_list_collection_files(app_name: str, collection_name: str) -> dict:
     try:
-        files = await _list_collection_files(collection_name=collection_name, app_name=app_name)
+        files = await get_vector_store().list_files(collection_name=collection_name, app_name=app_name)
         return {"app_name": app_name, "collection_name": collection_name, "files": sorted(files)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 async def admin_delete_collection(app_name: str, collection_name: str) -> dict:
-    success = await _delete_collection(collection_name=collection_name, app_name=app_name)
+    success = await get_vector_store().delete_collection(collection_name=collection_name, app_name=app_name)
     if not success:
         raise HTTPException(status_code=404, detail="Collection not found.")
     await log_event("COLLECTION_DELETED", {"collection": collection_name}, app_name=app_name)
@@ -163,7 +155,7 @@ async def admin_delete_collection(app_name: str, collection_name: str) -> dict:
 
 async def admin_vector_search(app_name: str, collection_name: str, query: str, n_results: int = 5) -> dict:
     try:
-        results = await _search_collection(
+        results = await get_vector_store().search(
             collection_name=collection_name, app_name=app_name, query=query, n_results=n_results
         )
         return {"query": query, "app_name": app_name, "collection_name": collection_name, "results": results}
@@ -173,7 +165,7 @@ async def admin_vector_search(app_name: str, collection_name: str, query: str, n
 
 async def admin_delete_file(app_name: str, collection_name: str, filename: str) -> dict:
     try:
-        await _delete_file(collection_name=collection_name, filename=filename, app_name=app_name)
+        await get_vector_store().delete_file(collection_name=collection_name, filename=filename, app_name=app_name)
         await log_event("FILE_DELETED", {"filename": filename, "collection": collection_name}, app_name=app_name)
         logger.info(f"Admin deleted file '{filename}' from '{collection_name}' for app '{app_name}'")
         return {"status": "success", "message": f"File '{filename}' deleted."}
