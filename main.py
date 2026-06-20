@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Praixis - Business logic based API",
     description="Custom decoupled business logic API powered by a local OpenAI-compatible LLM.",
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/swagger/docs",
     redoc_url="/docs",
     lifespan=lifespan,

@@ -1,7 +1,7 @@
 import asyncio
 from fastapi import HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from src.models.schemas import EmbedRequest, QuestionRequest
+from src.models.schemas import EmbedRequest, QuestionRequest, SearchRequest
 from src.services.rag_service import generate_comparison, generate_rag_answer, generate_summary, reformulate_query
 from src.utils.file_parser import extract_text_from_file, MAX_FILE_SIZE
 from src.utils.vectordb import get_vector_store
@@ -118,7 +118,7 @@ async def handle_rag_upload(
     return {"collection_name": collection_name, "processed": len(results), "succeeded": success_count, "results": results}
 
 
-async def handle_rag_question(request: QuestionRequest, app_name: str) -> StreamingResponse:
+async def handle_rag_question(request: QuestionRequest, app_name: str) -> StreamingResponse | dict:
     # Check the collection before any LLM work, so a typo'd name is a clean 404
     # instead of a burned reformulation call and a streamed non-answer.
     if not await get_vector_store().collection_exists(collection_name=request.collection_name, app_name=app_name):
@@ -262,6 +262,38 @@ async def handle_compare_documents(
 
     logger.info(f"Streaming comparison between {file_1} and {file_2} for app: {app_name}")
     return StreamingResponse(_guarded(), media_type="text/event-stream")
+
+
+async def handle_vector_search(request: SearchRequest, app_name: str) -> dict:
+    # Retrieval only: ranked raw chunks, no LLM and no synthesis. Unlike /ask this
+    # neither reformulates the query nor holds a GPU slot — callers that want to do
+    # their own synthesis (e.g. an orchestrator fusing this with other sources) get
+    # the chunks and their scores untouched. Reuses the same backend-agnostic
+    # store.search() the admin panel uses (hybrid on pgvector, dense on chroma).
+    try:
+        store = get_vector_store()
+        results = await store.search(
+            collection_name=request.collection_name,
+            app_name=app_name,
+            query=request.query,
+            n_results=request.n_results,
+        )
+    except ValueError as ve:
+        logger.warning(f"Value error in handle_vector_search: {str(ve)}")
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Error in handle_vector_search: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal error.")
+    logger.info(f"Vector search in collection: {request.collection_name} for app: {app_name}, hits: {len(results)}")
+    # score_type tells the caller how to read the score: small RRF values on the
+    # hybrid backend vs a 0–1 similarity on the dense-only backend.
+    return {
+        "collection_name": request.collection_name,
+        "query": request.query,
+        "n_results": request.n_results,
+        "results": results,
+        "score_type": "rrf" if store.supports_hybrid else "similarity",
+    }
 
 
 async def handle_embed(request: EmbedRequest) -> dict:

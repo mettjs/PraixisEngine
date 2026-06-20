@@ -18,6 +18,11 @@ class QuestionRequest(BaseModel):
     stream: bool = True
     response_format: Literal["text", "json"] = "text"
 
+class SearchRequest(BaseModel):
+    collection_name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$")
+    query: str = Field(..., min_length=1)
+    n_results: int = Field(default=5, ge=1, le=20)
+
 class EmbedRequest(BaseModel):
     text: str = Field(..., min_length=1)
 

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, File, Path, Query, Request, UploadFile, Form
 from src.dependencies.security import verify_api_key
-from src.models.schemas import CompareRequest, EmbedRequest, QuestionRequest
+from src.models.schemas import CompareRequest, EmbedRequest, QuestionRequest, SearchRequest
 from src.controllers.rag_controller import (
     handle_rag_upload,
     handle_compare_documents,
@@ -8,6 +8,7 @@ from src.controllers.rag_controller import (
     handle_embed,
     handle_list_files,
     handle_rag_question,
+    handle_vector_search,
     handle_list_collections,
     handle_delete_collection,
     handle_summarize_document,
@@ -64,6 +65,16 @@ async def rag_ask_endpoint(
     app_name: str = Depends(verify_api_key)
 ):
     return await handle_rag_question(question_request, app_name=app_name)
+
+
+@router.post("/search")
+@limiter.limit("30/minute")
+async def rag_search_endpoint(
+    request: Request,
+    search_request: SearchRequest,
+    app_name: str = Depends(verify_api_key)
+):
+    return await handle_vector_search(search_request, app_name=app_name)
 
 
 @router.post("/embed")

@@ -393,6 +393,42 @@ With `stream=false` the same metadata and answer arrive as one JSON body:
 
 ---
 
+### RAG Search — `POST /rag-db/search`
+
+Retrieval **only** — returns the ranked raw chunks that match a query, with **no LLM call and no synthesis**. Use this when the caller wants to do its own reasoning over the evidence (e.g. an orchestrator fusing these chunks with other sources) instead of receiving a finished answer. Unlike `/rag-db/ask`, this endpoint does **not** reformulate the query and does **not** hold a GPU slot. It runs the same backend-agnostic ranked search the admin panel uses: hybrid (dense + full-text, fused with RRF) on pgvector, dense on Chroma.
+
+```json
+{
+  "collection_name": "company-policies",
+  "query": "vacation accrual rate",
+  "n_results": 5
+}
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `collection_name` | required | Target collection (alphanumeric/dash/underscore, 3–63 chars) |
+| `query` | required | The search text |
+| `n_results` | `5` | Number of chunks to return (1–20) |
+
+Returns one buffered JSON body (no streaming):
+
+```json
+{
+  "collection_name": "company-policies",
+  "query": "vacation accrual rate",
+  "n_results": 5,
+  "results": [
+    {"source": "hr-handbook.docx", "text": "Employees accrue 1.25 days per month...", "score": 0.0312}
+  ],
+  "score_type": "rrf"
+}
+```
+
+`score_type` tells you how to read `score`: `"rrf"` on the hybrid (pgvector) backend returns small Reciprocal Rank Fusion values where higher is better; `"similarity"` on the dense-only (Chroma) backend returns a 0–1 similarity. Returns `404` if the collection does not exist.
+
+---
+
 ### Improved Search (Hypothetical-Question Indexing)
 
 Formal documents (laws, policies, technical manuals) are written in a different register than the way people ask about them. A citizen asks *"can they fire me for being pregnant?"* while the statute says *"termination of the employment contract on grounds of pregnancy is prohibited."* Their embeddings sit far apart even though they're about the same thing — so pure semantic search can miss the right passage.
@@ -487,6 +523,7 @@ All limits are per API key (falls back to IP for unauthenticated routes).
 | `DELETE /general-requests/chat/{session_id}` | 30 / minute |
 | `POST /rag-db/upload` | 15 / minute |
 | `POST /rag-db/ask` | 30 / minute |
+| `POST /rag-db/search` | 30 / minute |
 | `POST /rag-db/embed` | 60 / minute |
 | `GET /rag-db/list` | 60 / minute |
 | `GET /rag-db/{collection}/files` | 60 / minute |
