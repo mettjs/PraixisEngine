@@ -137,12 +137,31 @@ If you changed `EMBEDDING_MODEL`, pass the same value as a build arg so Docker p
 docker compose up --build --build-arg EMBEDDING_MODEL=your-model-name
 ```
 
+### Bundled LLM backend (optional)
+
+The stacks above assume you already run an OpenAI-compatible LLM server (set `AI_API_URL`). To bring one up alongside the app, add an LLM overlay on top of either vector stack:
+
+```bash
+# vLLM — needs an NVIDIA Ampere-or-newer GPU; won't run on a Mac
+make up-local-vllm        # pgvector + vLLM   (or: up-chroma-vllm)
+
+# LiteLLM proxy + Ollama — no GPU required (CPU or host GPU)
+make up-local-litellm     # pgvector + LiteLLM + Ollama   (or: up-chroma-litellm)
+# then pull the model once into the ollama volume:
+docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.litellm.yml exec ollama ollama pull gemma4:e4b
+```
+
+Each overlay overrides `AI_API_URL`/`MODEL_NAME` to point at its in-network service, so you don't set those yourself — just pick the model with `VLLM_MODEL` or `LITELLM_MODEL` (plus `HUGGING_FACE_HUB_TOKEN` for gated models like Gemma on vLLM). See [LLM Backends](README.md#llm-backends) for the trade-offs between them.
+
 ### Tear down
 
 ```bash
 make down         # matches make up
 make down-local   # matches make up-local
 make down-chroma  # matches make up-chroma
+# LLM overlays add a matching down target, e.g.:
+make down-local-vllm     # matches up-local-vllm     (also down-chroma-vllm)
+make down-local-litellm  # matches up-local-litellm  (also down-chroma-litellm)
 ```
 
 ### Manual commands (without make)
@@ -156,6 +175,10 @@ docker compose -f docker-compose.yml -f docker-compose.chroma.yml up --build
 
 # App only (you provide REDIS_URL + POSTGRES_URL in .env)
 docker compose up --build
+
+# Add an LLM backend by appending its overlay to either stack above, e.g.:
+docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.vllm.yml up --build
+docker compose -f docker-compose.yml -f docker-compose.chroma.yml -f docker-compose.litellm.yml up --build
 ```
 
 ---

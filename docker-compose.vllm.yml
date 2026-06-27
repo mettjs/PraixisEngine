@@ -1,0 +1,61 @@
+# Overlay: run vLLM as a co-located, OpenAI-compatible LLM backend and point the
+# API at it. vLLM gives you continuous batching, so it serves many concurrent
+# requests far better than a single-stream backend — see the retuned GPU_*
+# concurrency caps in .env.example.
+#
+# REQUIRES an NVIDIA GPU on the host plus the nvidia-container-toolkit. This will
+# NOT run on Apple Silicon / CPU-only machines — on a Mac, run vLLM on a remote
+# GPU box instead and just set AI_API_URL to point at it (no compose service).
+#
+# Pair with whichever vector overlay you use:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml  -f docker-compose.vllm.yml up --build   # pgvector
+#   docker compose -f docker-compose.yml -f docker-compose.chroma.yml -f docker-compose.vllm.yml up --build   # chroma
+#   (or: make up-local-vllm / make up-chroma-vllm)
+#
+# Gemma repos are gated on HuggingFace: accept the license and set
+# HUGGING_FACE_HUB_TOKEN in your .env. Swap VLLM_MODEL for an ungated model
+# (e.g. Qwen/Qwen2.5-3B-Instruct) to skip that.
+services:
+  api:
+    # MODEL_NAME must match vLLM's --served-model-name (both default to VLLM_MODEL).
+    environment:
+      - AI_API_URL=http://vllm:8000/v1
+      - MODEL_NAME=${VLLM_MODEL:-google/gemma-4-E4B-it}
+    depends_on:
+      vllm:
+        condition: service_healthy
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    command:
+      - --model=${VLLM_MODEL:-google/gemma-4-E4B-it}
+      - --served-model-name=${VLLM_MODEL:-google/gemma-4-E4B-it}
+      - --max-model-len=8192
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist downloaded weights so a restart doesn't re-pull from HuggingFace.
+      - hf_cache:/root/.cache/huggingface
+    ipc: host  # vLLM uses shared memory for tensor ops; the default 64MB is too small.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      # vLLM exposes /health (outside the /v1 prefix); ready only once weights are
+      # loaded, which on a cold cache includes the model download — hence the long
+      # start_period.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 300s
+    restart: unless-stopped
+
+volumes:
+  hf_cache:

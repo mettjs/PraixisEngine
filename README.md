@@ -135,6 +135,25 @@ CHROMA_PATH=./chroma_data                                              # chroma 
 
 ---
 
+## LLM Backends
+
+The app talks to the LLM through a single OpenAI-compatible endpoint (`AI_API_URL` + `MODEL_NAME`), so any compliant server works. Point it at one you already run, or bring up a bundled backend with a Docker overlay that composes on top of either vector stack.
+
+| | External (default) | vLLM overlay | LiteLLM + Ollama overlay |
+|---|---|---|---|
+| File | — (just set `AI_API_URL`) | `docker-compose.vllm.yml` | `docker-compose.litellm.yml` (+ `litellm_config.yaml`) |
+| Adds | nothing — you run the server | a `vllm` service serving one model | a `litellm` proxy in front of an `ollama` engine |
+| GPU | whatever the server needs | **NVIDIA, Ampere or newer** (won't run on a Mac) | none required — Ollama runs on CPU or a host GPU |
+| Strength | reuse existing infrastructure | high concurrency via continuous batching | simplest local/Mac path; quantized models |
+| Model var | `MODEL_NAME` | `VLLM_MODEL` (HF repo id) | `LITELLM_MODEL` (Ollama tag) |
+| Make target | — | `make up-local-vllm` / `up-chroma-vllm` | `make up-local-litellm` / `up-chroma-litellm` |
+
+Both overlays override `AI_API_URL`/`MODEL_NAME` to point at the in-network service, so you only set the model. Compose them with whichever vector overlay you use, e.g. `make up-chroma-vllm`.
+
+**Which engine?** vLLM and Ollama are both inference *engines* (they run the model); LiteLLM is a *proxy/router* that runs no models itself. vLLM's continuous batching gives multi-x throughput under concurrent load, but it's built around FP16/BF16 and tensor cores — it expects Ampere-or-newer hardware and won't meaningfully help (and may not even run) on older Pascal-class cards like the Tesla P40. Ollama (llama.cpp) runs quantized GGUF models well on CPUs and older GPUs and is the easy local option. Keep LiteLLM in front when you serve several models/servers and want one endpoint with routing and fallbacks — it's orthogonal to vLLM, not replaced by it.
+
+---
+
 ## Project Structure
 
 ```

@@ -1,0 +1,69 @@
+# Overlay: run LiteLLM as an OpenAI-compatible proxy in front of an Ollama-served
+# Gemma model, and point the API at it. Unlike the vLLM overlay this needs NO
+# NVIDIA GPU — Ollama runs on CPU inside the container (or a host GPU where the
+# runtime exposes one), so it's the Mac-friendly local option, just slower.
+#
+# Pair with whichever vector overlay you use:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml  -f docker-compose.litellm.yml up --build   # pgvector
+#   docker compose -f docker-compose.yml -f docker-compose.chroma.yml -f docker-compose.litellm.yml up --build   # chroma
+#   (or: make up-local-litellm / make up-chroma-litellm)
+#
+# After the stack is healthy, pull the model once (persists in the ollama volume):
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.litellm.yml exec ollama ollama pull gemma4:e4b
+#
+# JSON-mode caveat: the chat / file_summary / RAG endpoints accept
+# response_format=json, which becomes OpenAI's {"type": "json_object"}. Ollama
+# implements this via its own `format: json`, and drop_params=true in
+# litellm_config.yaml means LiteLLM silently DROPS the param when the model/
+# version doesn't support it — so a client asking for JSON could get prose back.
+# Test a response_format=json request on this backend. (The HQ question pipeline
+# is unaffected: it emits plain one-question-per-line text, not JSON.)
+services:
+  api:
+    # MODEL_NAME must match a model_name in litellm_config.yaml.
+    environment:
+      - AI_API_URL=http://litellm:4000/v1
+      - AI_API_KEY=${LITELLM_MASTER_KEY:-sk-litellm-local}
+      - MODEL_NAME=${LITELLM_MODEL:-gemma4:e4b}
+    depends_on:
+      litellm:
+        condition: service_healthy
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      # Clients (this app) must send this as their API key.
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-litellm-local}
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      # Pulled model weights persist here across restarts.
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

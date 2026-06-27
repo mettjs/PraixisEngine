@@ -9,6 +9,10 @@ services:
     environment:
       - VECTOR_BACKEND=chroma
       - REDIS_URL=redis://redis:6379/0
+    # Embedded Chroma data persists here. Must be a named volume, or vector data
+    # dies on every image rebuild.
+    volumes:
+      - chroma_data:/app/chroma_data
     depends_on:
       redis:
         condition: service_healthy
@@ -28,4 +32,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  chroma_data:
   redis_data:

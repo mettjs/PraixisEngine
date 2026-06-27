@@ -1,0 +1,17 @@
+# LiteLLM proxy config (docker-compose.litellm.yml).
+#
+# Exposes an OpenAI-compatible endpoint in front of an Ollama-served Gemma model.
+# The app's MODEL_NAME must equal a model_name below — keep them in sync via the
+# LITELLM_MODEL env var (default: gemma4:e4b).
+model_list:
+  - model_name: gemma4:e4b
+    litellm_params:
+      # ollama_chat/ uses Ollama's chat endpoint (proper role/template handling),
+      # which is what this app's chat + RAG message structure needs.
+      model: ollama_chat/gemma4:e4b
+      api_base: http://ollama:11434
+
+litellm_settings:
+  # Silently drop request params the backend doesn't support instead of erroring.
+  # Keeps interactive calls robust; see the JSON-mode caveat in the overlay header.
+  drop_params: true
