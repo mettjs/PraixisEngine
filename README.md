@@ -33,7 +33,7 @@ pip install "praixis[async]"
 
 ## Features
 
-- **Stateful Chat** — Persistent, session-based conversations stored in Redis with configurable TTL and automatic context-window trimming
+- **Stateful Chat** — Persistent, session-based conversations stored in Redis with configurable TTL and automatic context management: when a session approaches the `CONTEXT_WINDOW` token budget, older exchanges are compacted into an LLM-written summary (recent turns kept verbatim) instead of being dropped; compaction is also available on demand per session
 - **RAG (Retrieval-Augmented Generation)** — Upload documents into named vector collections (single or batch) and ask grounded questions with source attribution; supports metadata filters and custom chunk sizes. On the pgvector backend retrieval is hybrid: dense vector similarity fused with full-text keyword search via Reciprocal Rank Fusion
 - **Pluggable Vector Store** — One `VECTOR_BACKEND` setting selects the retrieval backend: **pgvector** (PostgreSQL: hybrid dense + full-text search, the default) or **chroma** (embedded ChromaDB: zero extra infrastructure, pure vector search). Both share the same embeddings, chunking, API surface, and Improved Search; see [Vector Store Backends](#vector-store-backends)
 - **Improved Search (Hypothetical-Question Indexing)** — Opt-in per upload (`improved_search=true`). After a document is stored, an LLM generates the natural-language questions each chunk answers; those questions are embedded and indexed so plain, conversational queries match better against formal or technical source text (closing the "genre gap" between how people ask and how documents are written). Generation runs in the background on a **dedicated GPU pool** so it never competes with live chat/RAG traffic; the document is searchable immediately and question matching improves once generation finishes
@@ -44,7 +44,7 @@ pip install "praixis[async]"
 - **Admin Panel** — HTTP Basic Auth-protected endpoints for provisioning/revoking API keys, wiping sessions, token usage stats, GPU monitoring, and audit log access
 - **Rate Limiting** — Per-API-key, per-endpoint request limits to protect GPU resources (falls back to IP for unauthenticated routes)
 - **Redis-backed GPU Concurrency** — Global token buckets in Redis (BLPOP/RPUSH) enforce concurrency across all workers and container replicas. Two independent pools: a shared `GPU_CONCURRENCY` pool for interactive calls (requests block up to `GPU_WAIT_TIMEOUT` seconds, default 30 s, then return `503`) and a separate `HQ_GPU_CONCURRENCY` pool reserved for background question generation so it never starves live traffic
-- **Usage Tracking** — Per-app prompt/completion token counters in Redis, exposed via admin endpoints
+- **Usage Tracking** — Prompt/completion token counters in Redis, per app (exposed via admin endpoints) and per session (exposed to clients via `GET /general-requests/chat/{session_id}/usage`); session counters expire with the session
 - **Async I/O** — Fully async stack: `redis.asyncio`, `AsyncOpenAI`, `asyncpg` for PostgreSQL/pgvector (Chroma's sync client is isolated in worker threads)
 - **Structured Output** — Optional `response_format: "json"` field on chat requests for machine-readable responses
 - **Embeddings** — Direct embedding endpoint returns the raw vector for any text input using the same multilingual model (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384 dimensions) the RAG pipeline uses internally; model is configurable via `EMBEDDING_MODEL` (must be paired with `EMBEDDING_DIMS` set to the model's output dimension — startup validates the pair and fails fast if they disagree)
@@ -88,8 +88,9 @@ Client App (with X-API-Key)
 1. Client sends `POST /general-requests/chat` with `X-API-Key` header
 2. `verify_api_key` hashes the key with SHA-256 and looks it up in Redis → resolves to `app_name`
 3. Session is retrieved from Redis (or created) using `chat:{app_name}:{session_id}`
-4. User message is appended to history and sent to the LLM as a streaming request
-5. Response is streamed back token-by-token; full response is saved to Redis on completion
+4. User message is appended to history; if the history is near the `CONTEXT_WINDOW` budget, older exchanges are auto-compacted into a summary first
+5. History is sent to the LLM as a streaming request
+6. Response is streamed back token-by-token; full response is saved to Redis on completion and token usage is recorded per app and per session
 
 ### Request Flow — RAG Q&A
 
@@ -191,6 +192,7 @@ PraixisEngine/
     ├── services/
     │   ├── chat_service.py    # LLM streaming, file summary map-reduce
     │   ├── rag_service.py     # RAG pipeline, query reformulation, comparison
+    │   ├── compaction.py      # Conversation compaction (auto + on-demand summary of older turns)
     │   └── llm_runner.py      # Shared LLM execution, concurrent map-reduce, GPU slot management
     ├── models/
     │   └── schemas.py         # Pydantic request models
@@ -202,7 +204,7 @@ PraixisEngine/
         ├── store/             # Redis client + data stores
         │   ├── client.py      # Shared async Redis client
         │   ├── sessions.py    # Chat session history
-        │   ├── usage.py       # Per-app token usage counters
+        │   ├── usage.py       # Per-app and per-session token usage counters
         │   ├── api_keys.py    # API key storage (SHA-256 hashed)
         │   └── audit.py       # Event log (Redis lists, newest-first pagination)
         ├── file_parser.py     # PDF / DOCX / TXT text extraction & chunking
@@ -330,7 +332,11 @@ Returns `413 Request Entity Too Large` if the file exceeds 20 MB. The format is 
 |---|---|---|
 | `GET` | `/general-requests/chat/sessions/active` | List active session IDs for your app |
 | `GET` | `/general-requests/chat/{session_id}` | Fetch the full message history for a session |
-| `DELETE` | `/general-requests/chat/{session_id}` | Delete a session and its history |
+| `GET` | `/general-requests/chat/{session_id}/usage` | Token usage for the session: `requests`, `prompt_tokens`, `completion_tokens`, `total_tokens`, plus `estimated_context_tokens` (current history size vs `CONTEXT_WINDOW`) |
+| `POST` | `/general-requests/chat/{session_id}/compact` | Compact the conversation now: older exchanges are folded into an LLM-written summary, the last 3 exchanges stay verbatim. Returns message/token counts before and after. `400` if there is nothing to fold yet |
+| `DELETE` | `/general-requests/chat/{session_id}` | Delete a session, its history, and its usage counters |
+
+Compaction also happens **automatically**: when a session's history reaches ~80% of the `CONTEXT_WINDOW` token budget (estimated at ~4 chars/token), it is compacted transparently before the next reply, so long conversations retain their context instead of dropping their oldest turns.
 
 ---
 

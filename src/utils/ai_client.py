@@ -9,8 +9,11 @@ def get_async_ai_client() -> AsyncOpenAI:
     return AsyncOpenAI(base_url=_ai_api_url, api_key=_ai_api_key)
 
 
-async def record_llm_usage(response, app_name: str) -> None:
-    """Reads token counts from an OpenAI response and stores them in Redis."""
+async def record_llm_usage(response, app_name: str, session_id: str | None = None) -> None:
+    """Reads token counts from an OpenAI response and stores them in Redis.
+
+    When ``session_id`` is given, the tokens are additionally counted against
+    that session (on top of the per-app totals)."""
     try:
         usage = getattr(response, "usage", None)
         if usage:
@@ -18,6 +21,7 @@ async def record_llm_usage(response, app_name: str) -> None:
                 app_name=app_name,
                 prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                 completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                session_id=session_id,
             )
     except Exception as e:
         # Usage tracking must never break the main request, but a broken

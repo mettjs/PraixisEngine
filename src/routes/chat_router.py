@@ -1,7 +1,15 @@
 from fastapi import APIRouter, Depends, Request, UploadFile, File, Form
 from src.dependencies.security import verify_api_key
 from src.models.schemas import ChatRequest
-from src.controllers.chat_controller import handle_chat, handle_clear_history, handle_fetch_history, handle_file_summary, handle_list_sessions
+from src.controllers.chat_controller import (
+    handle_chat,
+    handle_clear_history,
+    handle_compact_session,
+    handle_fetch_history,
+    handle_file_summary,
+    handle_list_sessions,
+    handle_session_usage,
+)
 from src.utils.system.limiter import limiter
 
 router = APIRouter(
@@ -47,6 +55,18 @@ async def list_active_sessions(request: Request, app_name: str = Depends(verify_
 @limiter.limit("60/minute")
 async def fetch_chat_history(request: Request, session_id: str, app_name: str = Depends(verify_api_key)):
     return await handle_fetch_history(session_id, app_name=app_name)
+
+
+@router.get("/chat/{session_id}/usage")
+@limiter.limit("60/minute")
+async def fetch_session_usage(request: Request, session_id: str, app_name: str = Depends(verify_api_key)):
+    return await handle_session_usage(session_id, app_name=app_name)
+
+
+@router.post("/chat/{session_id}/compact")
+@limiter.limit("10/minute")
+async def compact_session(request: Request, session_id: str, app_name: str = Depends(verify_api_key)):
+    return await handle_compact_session(session_id, app_name=app_name)
 
 
 @router.delete("/chat/{session_id}")

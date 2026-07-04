@@ -126,7 +126,9 @@ async def handle_rag_question(request: QuestionRequest, app_name: str) -> Stream
 
     try:
         history = await get_session_history(session_id=request.session_id, app_name=app_name) if request.session_id else []
-        search_query = await reformulate_query(history, request.question, app_name=app_name)
+        search_query = await reformulate_query(
+            history, request.question, app_name=app_name, session_id=request.session_id
+        )
         relevant_chunks = await get_vector_store().query(
             collection_name=request.collection_name,
             app_name=app_name,

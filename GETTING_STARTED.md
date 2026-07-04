@@ -51,7 +51,8 @@ REDIS_URL=redis://localhost:6379/0
 
 # Session
 SESSION_TTL=86400       # seconds — default 24 hours
-MAX_HISTORY_PAIRS=20    # user+assistant turns kept before oldest are trimmed
+CONTEXT_WINDOW=8192     # token budget per session (~4 chars/token estimate); at ~80% full,
+                        #   older exchanges are auto-compacted into an LLM-written summary
 
 # Vector store — pgvector (default, hybrid retrieval, needs Postgres)
 # or chroma (embedded, zero infrastructure, pure vector search)

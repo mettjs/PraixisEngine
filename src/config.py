@@ -35,7 +35,13 @@ MODEL_NAME: str = os.getenv("MODEL_NAME", "gemma-api-test")
 # --- Redis & sessions ---
 REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL: int = int(os.getenv("SESSION_TTL", "86400"))          # seconds
-MAX_HISTORY_PAIRS: int = int(os.getenv("MAX_HISTORY_PAIRS", "20")) # user+assistant turns kept
+
+# Token budget for a session's conversation history (history size is estimated
+# at ~4 chars/token). When a session approaches this budget, older exchanges are
+# automatically compacted into an LLM-written summary instead of being dropped.
+# Size it to your model's context window, leaving room for the completion and,
+# on RAG requests, the retrieved context.
+CONTEXT_WINDOW: int = int(os.getenv("CONTEXT_WINDOW", "8192"))
 
 # --- GPU concurrency ---
 GPU_CONCURRENCY: int = int(os.getenv("GPU_CONCURRENCY", "2"))

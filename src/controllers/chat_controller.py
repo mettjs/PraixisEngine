@@ -3,7 +3,9 @@ from fastapi import HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from src.utils.file_parser import extract_text_from_file, MAX_FILE_SIZE
 from src.services.chat_service import generate_chat_stream, generate_file_summary
-from src.utils.store.sessions import delete_session, get_all_active_sessions, get_session_history
+from src.services.compaction import compact_history, compactable, estimate_tokens
+from src.utils.store.sessions import delete_session, get_all_active_sessions, get_session_history, persist_history
+from src.utils.store.usage import get_session_usage
 from src.utils.system.logger import logger
 from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json
 from src.utils.concurrency import GPUBusyError, acquire_gpu_slot
@@ -123,3 +125,52 @@ async def handle_clear_history(session_id: str, app_name: str) -> dict:
 async def handle_list_sessions(app_name: str) -> dict:
     logger.info(f"Listing active sessions for app: {app_name}")
     return {"active_sessions": await get_all_active_sessions(app_name=app_name)}
+
+
+async def handle_session_usage(session_id: str, app_name: str) -> dict:
+    history = await get_session_history(session_id=session_id, app_name=app_name)
+    if not history:
+        raise HTTPException(status_code=404, detail="Session not found or expired.")
+    usage = await get_session_usage(app_name=app_name, session_id=session_id)
+    usage["estimated_context_tokens"] = estimate_tokens(history)
+    return usage
+
+
+async def handle_compact_session(session_id: str, app_name: str) -> dict:
+    history = await get_session_history(session_id=session_id, app_name=app_name)
+    if not history:
+        raise HTTPException(status_code=404, detail="Session not found or expired.")
+    if not compactable(history):
+        raise HTTPException(
+            status_code=400,
+            detail="Not enough history to compact — the conversation already fits in the verbatim window.",
+        )
+
+    try:
+        slot = await acquire_gpu_slot()
+    except GPUBusyError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    # compact_history uses the raw client, so this endpoint owns the slot for
+    # the duration of the summarization call.
+    try:
+        compacted = await compact_history(history, app_name=app_name, session_id=session_id)
+    except Exception as e:
+        logger.error(f"Compaction failed for session {session_id} (app: {app_name}): {e}")
+        raise HTTPException(status_code=502, detail="Compaction failed: could not summarize the conversation.")
+    finally:
+        await slot.release()
+
+    await persist_history(app_name=app_name, session_id=session_id, history=compacted)
+    logger.info(
+        f"Compacted session {session_id} (app: {app_name}): "
+        f"{len(history)} -> {len(compacted)} messages"
+    )
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "messages_before": len(history),
+        "messages_after": len(compacted),
+        "estimated_tokens_before": estimate_tokens(history),
+        "estimated_tokens_after": estimate_tokens(compacted),
+    }

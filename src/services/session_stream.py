@@ -8,6 +8,7 @@ owned by ``SlotReleasingStreamingResponse`` in the controller, not here.
 from collections.abc import AsyncGenerator
 
 from src.config import MODEL_NAME as _MODEL_NAME
+from src.services.compaction import compact_history, needs_compaction
 from src.utils.ai_client import get_async_ai_client, record_llm_usage
 from src.utils.store.sessions import get_or_create_session, persist_history
 from src.utils.system.logger import logger
@@ -24,7 +25,10 @@ async def open_user_turn(
     """Resolves the session, appends the user message, and persists it.
 
     Persisting before the LLM call means the user's message survives even if
-    generation fails afterwards.
+    generation fails afterwards. When the history approaches the CONTEXT_WINDOW
+    budget it is auto-compacted first — safe here because both callers (chat
+    and RAG) already hold the GPU slot the compaction call needs. A compaction
+    failure falls back to the uncompacted history rather than failing the turn.
     """
     active_session_id, history = await get_or_create_session(
         session_id=session_id,
@@ -32,6 +36,14 @@ async def open_user_turn(
         app_name=app_name,
     )
     history.append({"role": "user", "content": user_message})
+    if needs_compaction(history):
+        try:
+            history = await compact_history(history, app_name=app_name, session_id=active_session_id)
+            logger.info(f"Auto-compacted session {active_session_id} (app: {app_name}).")
+        except Exception as e:
+            logger.warning(
+                f"Auto-compaction failed for session {active_session_id} (app: {app_name}): {e}"
+            )
     await persist_history(app_name=app_name, session_id=active_session_id, history=history)
     return active_session_id, history
 
@@ -67,7 +79,7 @@ async def stream_assistant_turn(
                 full_response += token
                 yield token
             if not usage_recorded and getattr(chunk, "usage", None):
-                await record_llm_usage(chunk, app_name)
+                await record_llm_usage(chunk, app_name, session_id=session_id)
                 usage_recorded = True
     finally:
         if full_response:

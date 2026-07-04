@@ -1,23 +1,14 @@
 import uuid
 import json
 import re
-from src.config import SESSION_TTL as _SESSION_TTL, MAX_HISTORY_PAIRS as _MAX_HISTORY_PAIRS
+from src.config import SESSION_TTL as _SESSION_TTL
 from src.utils.store.client import redis_client
+from src.utils.store.usage import delete_all_session_usage, delete_session_usage
 from src.utils.system.logger import logger
 
 
 def _get_redis_key(app_name: str, session_id: str) -> str:
     return f"chat:{app_name}:{session_id}"
-
-
-def _trim_history(history: list) -> list:
-    """Keeps the system prompt and the most recent MAX_HISTORY_PAIRS exchange pairs."""
-    system = [m for m in history if m["role"] == "system"]
-    messages = [m for m in history if m["role"] != "system"]
-    max_messages = _MAX_HISTORY_PAIRS * 2
-    if len(messages) > max_messages:
-        messages = messages[-max_messages:]
-    return system + messages
 
 
 async def get_or_create_session(
@@ -59,14 +50,15 @@ async def get_or_create_session(
 
 
 async def persist_history(app_name: str, session_id: str, history: list) -> None:
-    """Trims and writes an in-memory history back to Redis in a single round-trip.
+    """Writes an in-memory history back to Redis in a single round-trip.
 
     Use this when the caller already holds the history (e.g. from
     get_or_create_session) to avoid a redundant read-modify-write round-trip.
+    History growth is bounded by compaction (see ``services.compaction``), not
+    by trimming here, so nothing is dropped on write.
     """
     redis_key = _get_redis_key(app_name, session_id)
-    trimmed = _trim_history(history)
-    await redis_client.setex(redis_key, _SESSION_TTL, json.dumps(trimmed))
+    await redis_client.setex(redis_key, _SESSION_TTL, json.dumps(history))
 
 
 async def get_session_history(app_name: str, session_id: str) -> list:
@@ -79,7 +71,10 @@ async def get_session_history(app_name: str, session_id: str) -> list:
 
 async def delete_session(app_name: str, session_id: str) -> bool:
     redis_key = _get_redis_key(app_name, session_id)
-    return await redis_client.delete(redis_key) > 0  # type: ignore[operator]
+    deleted = await redis_client.delete(redis_key) > 0  # type: ignore[operator]
+    if deleted:
+        await delete_session_usage(app_name=app_name, session_id=session_id)
+    return deleted
 
 
 async def get_all_active_sessions(app_name: str) -> list:
@@ -92,8 +87,11 @@ async def get_all_active_sessions(app_name: str) -> list:
 
 
 async def delete_all_app_sessions(app_name: str) -> int:
-    """Deletes all sessions for the given app. Returns the count of deleted keys."""
+    """Deletes all sessions for the given app (and their per-session usage
+    counters). Returns the count of deleted session keys."""
     keys = [key async for key in redis_client.scan_iter(f"chat:{app_name}:*")]
     if not keys:
         return 0
-    return int(await redis_client.delete(*keys))  # type: ignore[arg-type]
+    count = int(await redis_client.delete(*keys))  # type: ignore[arg-type]
+    await delete_all_session_usage(app_name)
+    return count

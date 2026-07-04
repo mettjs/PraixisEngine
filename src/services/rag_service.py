@@ -60,7 +60,9 @@ async def generate_rag_answer(
         yield token
 
 
-async def reformulate_query(history: list, latest_question: str, app_name: str) -> str:
+async def reformulate_query(
+    history: list, latest_question: str, app_name: str, session_id: str | None = None
+) -> str:
     """Uses recent chat history to rewrite follow-up questions into standalone queries.
 
     Returns the question unchanged when it introduces a new, independent topic so that
@@ -88,6 +90,7 @@ async def reformulate_query(history: list, latest_question: str, app_name: str) 
             {"role": "user", "content": user_msg},
         ],
         app_name,
+        session_id=session_id,
     )
     return content.strip() if content else latest_question
 
