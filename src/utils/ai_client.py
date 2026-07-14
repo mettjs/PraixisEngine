@@ -4,9 +4,21 @@ from src.utils.store.usage import record_usage
 from src.utils.system.logger import logger
 
 
+_client: AsyncOpenAI | None = None
+
+
 def get_async_ai_client() -> AsyncOpenAI:
-    """Returns an async OpenAI-compatible client."""
-    return AsyncOpenAI(base_url=_ai_api_url, api_key=_ai_api_key)
+    """Returns the shared async OpenAI-compatible client.
+
+    A process-wide singleton so every call site shares one httpx connection
+    pool instead of each module holding its own. Callers needing different
+    settings (e.g. the health check's short timeout) use ``with_options``,
+    which shares the underlying pool.
+    """
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(base_url=_ai_api_url, api_key=_ai_api_key)
+    return _client
 
 
 async def record_llm_usage(response, app_name: str, session_id: str | None = None) -> None:

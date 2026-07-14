@@ -7,7 +7,7 @@ from src.services.compaction import compact_history, compactable, estimate_token
 from src.utils.store.sessions import delete_session, get_all_active_sessions, get_session_history, persist_history
 from src.utils.store.usage import get_session_usage
 from src.utils.system.logger import logger
-from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json
+from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json, guard_stream
 from src.utils.concurrency import GPUBusyError, acquire_gpu_slot
 
 
@@ -32,7 +32,7 @@ async def handle_chat(request: ChatRequest, app_name: str) -> StreamingResponse 
     try:
         if request.stream:
             logger.info(f"Received chat request for app: {app_name}, session: {request.session_id}")
-            return SlotReleasingStreamingResponse(reply, slot=slot, media_type="text/event-stream")
+            return SlotReleasingStreamingResponse(guard_stream(reply), slot=slot, media_type="text/event-stream")
         logger.info(f"Received buffered chat request for app: {app_name}, session: {request.session_id}")
         try:
             return await drain_to_json(reply)
@@ -93,15 +93,8 @@ async def handle_file_summary(
         except GPUBusyError as e:
             raise HTTPException(status_code=503, detail=str(e))
 
-    async def _guarded():
-        try:
-            async for piece in _summary_with_header():
-                yield piece
-        except GPUBusyError as e:
-            yield f"[ERROR:{e}]\n"
-
     logger.info(f"Streaming file summary for app: {app_name}, file: {filename}")
-    return StreamingResponse(_guarded(), media_type="text/event-stream")
+    return StreamingResponse(guard_stream(_summary_with_header()), media_type="text/event-stream")
 
 
 async def handle_fetch_history(session_id: str, app_name: str) -> dict:
@@ -120,6 +113,32 @@ async def handle_clear_history(session_id: str, app_name: str) -> dict:
         logger.warning(f"Session not found for deletion for app: {app_name}, session: {session_id}")
         raise HTTPException(status_code=404, detail="Session not found.")
     return {"status": "success", "detail": "Session deleted."}
+
+
+async def handle_undo_last_exchange(session_id: str, app_name: str) -> dict:
+    """Removes the last user message and everything after it (the assistant
+    reply — or nothing, if generation failed), so the client can retry or
+    regenerate. System messages, including compaction summaries, stay."""
+    history = await get_session_history(session_id=session_id, app_name=app_name)
+    if not history:
+        raise HTTPException(status_code=404, detail="Session not found or expired.")
+    user_indices = [i for i, m in enumerate(history) if m.get("role") == "user"]
+    if not user_indices:
+        raise HTTPException(status_code=400, detail="Nothing to undo — the session has no user messages left.")
+    cut = user_indices[-1]
+    removed = history[cut:]
+    remaining = history[:cut]
+    await persist_history(app_name=app_name, session_id=session_id, history=remaining)
+    logger.info(
+        f"Undid last exchange for session {session_id} (app: {app_name}): removed {len(removed)} message(s)."
+    )
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "removed_messages": len(removed),
+        "undone_prompt": removed[0].get("content", ""),
+        "messages_remaining": len(remaining),
+    }
 
 
 async def handle_list_sessions(app_name: str) -> dict:

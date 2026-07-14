@@ -1,7 +1,7 @@
 <!-- ═══════════════════════════════════════════════════════
-     MODAL: Confirm Revoke API Key
+     MODAL: Confirm Rotate API Key
      ═══════════════════════════════════════════════════════ -->
-<div x-show="modal === 'revokeKey'"
+<div x-show="modal === 'rotateKey'"
      x-transition:enter="transition ease-out duration-150"
      x-transition:enter-start="opacity-0"
      x-transition:enter-end="opacity-100"
@@ -17,14 +17,16 @@
 
     <!-- Header -->
     <div class="px-6 pt-6 pb-4 border-b border-slate-700">
-      <h3 class="font-semibold text-slate-100">Revoke API Key</h3>
+      <h3 class="font-semibold text-slate-100">Rotate API Key</h3>
     </div>
 
     <!-- Body -->
     <div class="px-6 py-5 space-y-4">
       <p class="text-sm text-slate-300">
-        Are you sure you want to permanently revoke the API key for
-        <strong class="text-slate-100" x-text="modalData.app_name"></strong>?
+        Issue a new API key for
+        <strong class="text-slate-100" x-text="modalData.app_name"></strong>
+        and revoke the current one? The new key goes live before the old one is
+        revoked, so the app never has a window with zero valid keys.
       </p>
 
       <!-- Key details -->
@@ -34,23 +36,24 @@
           <span class="text-slate-300 font-medium" x-text="modalData.app_name"></span>
         </div>
         <div class="flex gap-2 text-xs">
-          <span class="text-slate-500 w-20">Key</span>
+          <span class="text-slate-500 w-20">Old key</span>
           <code class="text-slate-300 font-mono" x-text="modalData.key_preview"></code>
         </div>
       </div>
 
-      <p class="text-xs text-red-400">
-        This action cannot be undone. Any application using this key will lose access immediately.
+      <p class="text-xs text-amber-400 flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5 shrink-0"><use href="#ic-warn"/></svg>
+        The old key stops working immediately — update the app with the new key right away.
       </p>
     </div>
 
     <!-- Footer -->
     <div class="px-6 pb-6 flex justify-end gap-3">
       <button @click="modal = null" class="btn-ghost">Cancel</button>
-      <button @click="revokeKey()" class="btn-danger" :disabled="modalLoading">
+      <button @click="rotateKey()" class="btn-primary" :disabled="modalLoading">
         <span x-show="modalLoading" class="spinner"></span>
-        <svg x-show="!modalLoading" class="w-4 h-4"><use href="#ic-trash"/></svg>
-        Revoke Key
+        <svg x-show="!modalLoading" class="w-4 h-4"><use href="#ic-refresh"/></svg>
+        Rotate Key
       </button>
     </div>
 

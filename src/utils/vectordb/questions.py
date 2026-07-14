@@ -25,6 +25,7 @@ from src.config import (
 )
 from src.services.llm_runner import call_llm
 from src.utils.concurrency import hq_gpu_slot
+from src.utils.store.client import redis_client
 from src.utils.vectordb import get_vector_store
 from src.utils.vectordb.base import StaleChunksError
 from src.utils.vectordb.embeddings import embed
@@ -105,11 +106,16 @@ async def generate_and_store_questions(
     source: str,
     chunks: list[dict],
     per_chunk: int = _PER_CHUNK,
+    purge_existing: bool = False,
 ) -> int:
     """Generate, embed, and store hypothetical questions for a file's chunks.
 
     ``chunks`` is the list of just-inserted parent rows, each a dict with keys
     ``id``, ``chunk_index``, ``content``. Returns the number of questions stored.
+
+    ``purge_existing`` (the regenerate path) deletes the file's current
+    questions only once the new pass has produced results — a fully-failed pass
+    must never leave a file that had a working index with no questions at all.
 
     In-process generation is bounded by ``_LOCAL_CONCURRENCY`` (the reserved GPU
     pool size) and tolerant of per-chunk failures; a chunk that yields no
@@ -144,6 +150,9 @@ async def generate_and_store_questions(
     embeddings = await asyncio.to_thread(embed, [q for _, q in pairs])
 
     entries = [(chunk, q, emb) for (chunk, q), emb in zip(pairs, embeddings)]
+    if purge_existing:
+        # Replace the old index only now that the new one is ready to store.
+        await get_vector_store().delete_questions(app_name, collection_name, source)
     await get_vector_store().store_questions(app_name, collection_name, source, entries)
     logger.info(
         f"Stored {len(entries)} hypothetical questions for '{source}' "
@@ -157,11 +166,47 @@ async def generate_and_store_questions(
 # collected mid-run; the done callback drops the reference once it finishes.
 _background_tasks: set[asyncio.Task] = set()
 
+# Generation-in-progress markers live in Redis so status is visible across
+# workers. Best-effort: the TTL is a generous ceiling that clears the marker
+# even if the owning process dies mid-generation.
+_PENDING_TTL = 2 * 3600
 
-async def _run_generation(app_name: str, collection_name: str, source: str, chunks: list[dict]) -> None:
-    """Background wrapper: best-effort, never raises into the event loop."""
+
+def _pending_key(app_name: str, collection_name: str, source: str) -> str:
+    return f"hyq:pending:{app_name}:{collection_name}:{source}"
+
+
+async def is_generation_pending(app_name: str, collection_name: str, source: str) -> bool:
+    """True while a background generation pass for this file is running."""
+    return bool(await redis_client.exists(_pending_key(app_name, collection_name, source)))
+
+
+async def _set_pending(app_name: str, collection_name: str, source: str, exclusive: bool) -> bool:
+    """Sets the pending marker; with ``exclusive``, only if it is not already set.
+
+    The marker is set BEFORE the background task is created (not inside it), so
+    a status check immediately after scheduling sees the pass as pending and an
+    exclusive set doubles as an atomic already-running guard.
+    """
+    key = _pending_key(app_name, collection_name, source)
+    if exclusive:
+        return bool(await redis_client.set(key, "1", ex=_PENDING_TTL, nx=True))
+    await redis_client.set(key, "1", ex=_PENDING_TTL)
+    return True
+
+
+async def _run_generation(
+    app_name: str, collection_name: str, source: str, chunks: list[dict], purge_existing: bool = False
+) -> None:
+    """Background wrapper: best-effort, never raises into the event loop.
+
+    The pending marker is already set by the scheduler; this only clears it.
+    """
+    pending_key = _pending_key(app_name, collection_name, source)
     try:
-        await generate_and_store_questions(app_name, collection_name, source, chunks)
+        await generate_and_store_questions(
+            app_name, collection_name, source, chunks, purge_existing=purge_existing
+        )
     except StaleChunksError:
         # The file was deleted or re-uploaded while we were generating, so the
         # parent chunks these questions point to no longer exist. The newer
@@ -172,21 +217,42 @@ async def _run_generation(app_name: str, collection_name: str, source: str, chun
         )
     except Exception as e:
         logger.error(f"Background question generation failed for '{source}' (app={app_name}): {e}")
+    finally:
+        try:
+            await redis_client.delete(pending_key)
+        except Exception:
+            pass  # the TTL clears it eventually
 
 
-def schedule_question_generation(
+async def schedule_question_generation(
     app_name: str,
     collection_name: str,
     source: str,
     chunks: list[dict],
-) -> None:
+    *,
+    exclusive: bool = False,
+    purge_existing: bool = False,
+) -> bool:
     """Fire-and-forget hypothetical-question generation for a just-stored file.
 
-    Returns immediately; generation runs on the event loop without blocking the
-    upload response. A no-op when HQ_ENABLED is false or there is nothing to do.
+    Sets the pending marker, then returns; generation runs on the event loop
+    without blocking the upload response. With ``exclusive``, nothing is
+    scheduled when a pass for this file is already pending (the regenerate
+    endpoint's already-running guard — the marker set is atomic, so concurrent
+    callers cannot both schedule). ``purge_existing`` is forwarded to the pass
+    (see :func:`generate_and_store_questions`).
+
+    Returns True when a pass was scheduled; False when generation is disabled,
+    there is nothing to do, or an exclusive schedule found a pass already
+    pending.
     """
     if not _HQ_ENABLED or not chunks or not get_vector_store().supports_questions:
-        return
-    task = asyncio.create_task(_run_generation(app_name, collection_name, source, chunks))
+        return False
+    if not await _set_pending(app_name, collection_name, source, exclusive):
+        return False
+    task = asyncio.create_task(
+        _run_generation(app_name, collection_name, source, chunks, purge_existing=purge_existing)
+    )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+    return True

@@ -16,7 +16,11 @@ function _adminAudit() {
           this.auditEvents  = append ? [...this.auditEvents, ...events] : events;
           this.auditHasMore = events.length >= this.auditLimit;
           this.auditLoaded  = true;
+        } else if (r.status !== 401) {
+          this.showToast('Failed to load audit log.', 'error');
         }
+      } catch {
+        this.showToast('Failed to load audit log — network error.', 'error');
       } finally {
         this.loading.audit = false;
       }

@@ -1,19 +1,23 @@
-from fastapi import APIRouter, Depends, File, Path, Query, Request, UploadFile, Form
+from fastapi import APIRouter, Depends, File, Path, Query, UploadFile, Form
 from src.dependencies.security import verify_api_key
-from src.models.schemas import CompareRequest, EmbedRequest, QuestionRequest, SearchRequest
+from src.models.schemas import CompareRequest, EmbedRequest, QuestionRequest, SearchRequest, TextUploadRequest
 from src.controllers.rag_controller import (
     handle_rag_upload,
     handle_compare_documents,
     handle_delete_file,
     handle_embed,
+    handle_file_chunks,
     handle_list_files,
+    handle_question_status,
     handle_rag_question,
+    handle_regenerate_questions,
+    handle_upload_text,
     handle_vector_search,
     handle_list_collections,
     handle_delete_collection,
     handle_summarize_document,
 )
-from src.utils.system.limiter import limiter
+from src.utils.system.limiter import rate_limit
 
 router = APIRouter(
     prefix="/rag-db",
@@ -22,10 +26,8 @@ router = APIRouter(
 )
 
 
-@router.post("/upload")
-@limiter.limit("15/minute")
+@router.post("/upload", dependencies=[Depends(rate_limit("15/minute"))])
 async def rag_upload_endpoint(
-    request: Request,
     files: list[UploadFile] = File(..., description="One or more PDF, DOCX, or TXT files — max 20 MB each. "
                                                     "Type is detected from the filename extension, falling back to the "
                                                     "part's Content-Type, then to magic bytes."),
@@ -57,65 +59,95 @@ async def rag_upload_endpoint(
     )
 
 
-@router.post("/ask")
-@limiter.limit("30/minute")
+@router.post("/upload_text", dependencies=[Depends(rate_limit("15/minute"))])
+async def rag_upload_text_endpoint(
+    upload_request: TextUploadRequest,
+    app_name: str = Depends(verify_api_key)
+):
+    """Ingest raw text as a document — same pipeline as /upload without the
+    multipart step, for callers that already hold the text."""
+    return await handle_upload_text(upload_request, app_name=app_name)
+
+
+@router.post("/ask", dependencies=[Depends(rate_limit("30/minute"))])
 async def rag_ask_endpoint(
-    request: Request,
     question_request: QuestionRequest,
     app_name: str = Depends(verify_api_key)
 ):
     return await handle_rag_question(question_request, app_name=app_name)
 
 
-@router.post("/search")
-@limiter.limit("30/minute")
+@router.post("/search", dependencies=[Depends(rate_limit("30/minute"))])
 async def rag_search_endpoint(
-    request: Request,
     search_request: SearchRequest,
     app_name: str = Depends(verify_api_key)
 ):
     return await handle_vector_search(search_request, app_name=app_name)
 
 
-@router.post("/embed")
-@limiter.limit("60/minute")
+@router.post("/embed", dependencies=[Depends(rate_limit("60/minute"))])
 async def embed_endpoint(
-    request: Request,
     embed_request: EmbedRequest,
 ):
     return await handle_embed(embed_request)
 
 
-@router.get("/list")
-@limiter.limit("60/minute")
-async def rag_list_endpoint(request: Request, app_name: str = Depends(verify_api_key)):
+@router.get("/list", dependencies=[Depends(rate_limit("60/minute"))])
+async def rag_list_endpoint(app_name: str = Depends(verify_api_key)):
     return await handle_list_collections(app_name=app_name)
 
 
-@router.get("/{collection_name}/files")
-@limiter.limit("60/minute")
+@router.get("/{collection_name}/files", dependencies=[Depends(rate_limit("60/minute"))])
 async def rag_list_files_endpoint(
-    request: Request,
     collection_name: str = Path(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$"),
     app_name: str = Depends(verify_api_key)
 ):
     return await handle_list_files(collection_name=collection_name, app_name=app_name)
 
 
-@router.delete("/delete/{collection_name}")
-@limiter.limit("20/minute")
+@router.get("/{collection_name}/files/{filename}/chunks", dependencies=[Depends(rate_limit("30/minute"))])
+async def rag_file_chunks_endpoint(
+    filename: str = Path(..., description="Exact filename whose stored chunks to return."),
+    collection_name: str = Path(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$"),
+    app_name: str = Depends(verify_api_key)
+):
+    """Inspect how a document was chunked — useful for debugging retrieval."""
+    return await handle_file_chunks(collection_name=collection_name, filename=filename, app_name=app_name)
+
+
+@router.post("/{collection_name}/files/{filename}/questions", dependencies=[Depends(rate_limit("10/minute"))])
+async def rag_regenerate_questions_endpoint(
+    filename: str = Path(..., description="Exact filename to (re)index with hypothetical questions."),
+    collection_name: str = Path(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$"),
+    app_name: str = Depends(verify_api_key)
+):
+    """Backfill or rebuild the hypothetical-question index for an already-stored
+    file. Existing questions are purged first; generation runs in the background
+    (poll the GET endpoint for progress). 409 while a pass is already running."""
+    return await handle_regenerate_questions(collection_name=collection_name, filename=filename, app_name=app_name)
+
+
+@router.get("/{collection_name}/files/{filename}/questions", dependencies=[Depends(rate_limit("60/minute"))])
+async def rag_question_status_endpoint(
+    filename: str = Path(..., description="Exact filename to report question-index status for."),
+    collection_name: str = Path(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$"),
+    app_name: str = Depends(verify_api_key)
+):
+    """Question-index status for a file: chunks stored, questions stored, and
+    whether a background generation pass is currently running."""
+    return await handle_question_status(collection_name=collection_name, filename=filename, app_name=app_name)
+
+
+@router.delete("/delete/{collection_name}", dependencies=[Depends(rate_limit("20/minute"))])
 async def rag_delete_endpoint(
-    request: Request,
     collection_name: str = Path(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$"),
     app_name: str = Depends(verify_api_key)
 ):
     return await handle_delete_collection(collection_name=collection_name, app_name=app_name)
 
 
-@router.delete("/{collection_name}/files/{filename}")
-@limiter.limit("20/minute")
+@router.delete("/{collection_name}/files/{filename}", dependencies=[Depends(rate_limit("20/minute"))])
 async def rag_delete_file_endpoint(
-    request: Request,
     filename: str = Path(..., description="Exact filename to delete (e.g. policy_2024.pdf)."),
     collection_name: str = Path(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$"),
     app_name: str = Depends(verify_api_key)
@@ -123,10 +155,8 @@ async def rag_delete_file_endpoint(
     return await handle_delete_file(collection_name=collection_name, filename=filename, app_name=app_name)
 
 
-@router.post("/knowledge_base/compare")
-@limiter.limit("5/minute")
+@router.post("/knowledge_base/compare", dependencies=[Depends(rate_limit("5/minute"))])
 async def rag_compare_documents(
-    request: Request,
     compare_request: CompareRequest,
     app_name: str = Depends(verify_api_key)
 ):
@@ -140,10 +170,8 @@ async def rag_compare_documents(
     )
 
 
-@router.get("/knowledge_base/{collection_name}/files/{filename}/summary")
-@limiter.limit("10/minute")
+@router.get("/knowledge_base/{collection_name}/files/{filename}/summary", dependencies=[Depends(rate_limit("10/minute"))])
 async def rag_summarize_document(
-    request: Request,
     collection_name: str,
     filename: str,
     stream: bool = Query(default=False, description="Stream tokens as text/event-stream, or return one buffered JSON body."),

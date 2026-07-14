@@ -18,4 +18,5 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 
 @router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 async def admin_ui(request: Request):
-    return templates.TemplateResponse(request, "base.html")
+    # app.version reads pyproject.toml (see main._engine_version)
+    return templates.TemplateResponse(request, "base.html", {"version": request.app.version})

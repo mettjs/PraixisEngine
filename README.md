@@ -167,6 +167,12 @@ PraixisEngine/
 ├── docker-compose.chroma.yml  # Overlay: bundled Redis + embedded Chroma — no Postgres
 ├── tailwind.config.js         # Tailwind build config (brand colors, content paths)
 ├── pyproject.toml
+├── tests/                     # Pytest suite — fakeredis + fake LLM/embedder + temp Chroma (see Testing)
+│   ├── conftest.py            # Test bootstrap: fakes Redis, the LLM, and embeddings before app import
+│   ├── test_units.py          # Marker parsing, SOURCES escaping, file parsing, compaction sizing
+│   ├── test_chat_api.py       # /general-requests endpoints, auth, rate limits, GPU exhaustion
+│   ├── test_rag_api.py        # /rag-db endpoints against embedded Chroma, question index
+│   └── test_admin_api.py      # /api/system endpoints, key lifecycle, usage, audit
 └── src/
     ├── config.py             # Single source of truth: loads .env and parses all env vars
     ├── admin_panel/           # Browser-based admin UI (served at /admin)
@@ -210,7 +216,7 @@ PraixisEngine/
         ├── file_parser.py     # PDF / DOCX / TXT text extraction & chunking
         ├── system/            # Cross-cutting infrastructure
         │   ├── logger.py
-        │   └── limiter.py     # SlowAPI rate limiter
+        │   └── limiter.py     # Async Redis fixed-window rate limiter
         └── vectordb/          # Vector store: shared contract + per-backend packages
             ├── __init__.py    # Factory: resolves VECTOR_BACKEND to a store singleton
             ├── base.py        # VectorStore ABC + capability flags (supports_hybrid, supports_questions)
@@ -232,6 +238,22 @@ PraixisEngine/
                 ├── retrieval.py   # Dense search fused with question index via RRF
                 └── store.py       # ChromaStore — VectorStore implementation
 ```
+
+---
+
+## Testing
+
+```bash
+uv run pytest
+```
+
+The suite needs no external services: Redis is replaced by fakeredis, the LLM
+backend and the embedding model by deterministic in-process fakes (all wired in
+`tests/conftest.py` before the app is imported), and the vector store is real
+embedded Chroma on a temp directory — the same code paths a
+`VECTOR_BACKEND=chroma` deployment runs. The pgvector backend is exercised only
+by its shared contract; backend-specific SQL needs a real Postgres and is out
+of scope here.
 
 ---
 
@@ -334,6 +356,7 @@ Returns `413 Request Entity Too Large` if the file exceeds 20 MB. The format is 
 | `GET` | `/general-requests/chat/{session_id}` | Fetch the full message history for a session |
 | `GET` | `/general-requests/chat/{session_id}/usage` | Token usage for the session: `requests`, `prompt_tokens`, `completion_tokens`, `total_tokens`, plus `estimated_context_tokens` (current history size vs `CONTEXT_WINDOW`) |
 | `POST` | `/general-requests/chat/{session_id}/compact` | Compact the conversation now: older exchanges are folded into an LLM-written summary, the last 3 exchanges stay verbatim. Returns message/token counts before and after. `400` if there is nothing to fold yet |
+| `DELETE` | `/general-requests/chat/{session_id}/last` | Undo the last exchange: removes the most recent user message and the assistant reply that followed it (or just the user message if generation failed). Returns the `undone_prompt` so clients can retry or regenerate. Compaction summaries are kept. `400` if there is no user message left |
 | `DELETE` | `/general-requests/chat/{session_id}` | Delete a session, its history, and its usage counters |
 
 Compaction also happens **automatically**: when a session's history reaches ~80% of the `CONTEXT_WINDOW` token budget (estimated at ~4 chars/token), it is compacted transparently before the next reply, so long conversations retain their context instead of dropping their oldest turns.
@@ -370,6 +393,26 @@ Returns per-file results:
   ]
 }
 ```
+
+---
+
+### RAG Upload (raw text) — `POST /rag-db/upload_text`
+
+Ingest text directly, without wrapping it in a file — for callers that already hold the content (scraped pages, database records, generated documents). Runs the exact same pipeline as `/upload` after text extraction, so the stored document is indistinguishable from a file upload and works with every other endpoint (`ask`, `chunks`, `summary`, `compare`, delete, question indexing).
+
+```json
+{
+  "text": "Full document text here… (max 20 MB)",
+  "filename": "faq-2026.txt",
+  "collection_name": "main",
+  "chunking_strategy": "semantic",
+  "chunk_size": 2000,
+  "chunk_overlap": 150,
+  "improved_search": false
+}
+```
+
+`filename` is required — it becomes the document's stored identity, exactly as with `/upload`, and re-using one replaces the prior document. Returns `{"status", "collection_name", "filename", "chunks_stored", "improved_search"}`.
 
 ---
 
@@ -497,6 +540,9 @@ Response:
 |---|---|---|
 | `GET` | `/rag-db/list` | List all collections owned by your app |
 | `GET` | `/rag-db/{collection}/files` | List files inside a collection |
+| `GET` | `/rag-db/{collection}/files/{filename}/chunks` | Inspect a document's stored chunks (`chunk_index` + `content`, in order) — see exactly what retrieval sees when debugging |
+| `GET` | `/rag-db/{collection}/files/{filename}/questions` | Question-index status for a document: `total_chunks`, `questions_stored`, and `generation_pending` (true while a background pass is running) |
+| `POST` | `/rag-db/{collection}/files/{filename}/questions` | Backfill or rebuild the hypothetical-question index for an already-stored document — `improved_search` is no longer locked in at upload time. Regenerates in the background and swaps out the old questions only once the new pass has results, so a failed pass never strips a working index (poll the `GET` for progress). `409` while a pass is already running, `400` when `HQ_ENABLED=false` |
 | `DELETE` | `/rag-db/delete/{collection}` | Delete an entire collection |
 | `DELETE` | `/rag-db/{collection}/files/{filename}` | Delete a single document from a collection |
 | `GET` | `/rag-db/knowledge_base/{collection}/files/{filename}/summary` | 3-sentence summary of a document. Returns `{"filename", "content"}` by default; pass `?stream=true` for a token stream (`[FILE:...]` header, then `[PROGRESS:...]` lines, then tokens). Also accepts `?response_format=json` |
@@ -519,10 +565,12 @@ All admin endpoints require HTTP Basic Auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD`
 | `GET` | `/api/system/stats` | Active sessions, collection count, total vector chunks |
 | `GET` | `/api/system/keys` | List all provisioned keys (preview + created_at) and their app names |
 | `POST` | `/api/system/keys/generate?app_name=` | Generate a new API key |
+| `POST` | `/api/system/keys/rotate?key_hash=` | Rotate a key: issues a new key for the owning app, then revokes the old one — no zero-key window |
 | `DELETE` | `/api/system/keys/revoke-by-hash?key_hash=` | Revoke a key by its stored SHA-256 hash |
 | `DELETE` | `/api/system/sessions/{app_name}` | Force-wipe all active sessions for a specific app |
 | `GET` | `/api/system/usage` | Token usage totals across all apps |
 | `GET` | `/api/system/usage/{app_name}` | Token usage totals for a specific app |
+| `GET` | `/api/system/usage/{app_name}/daily?days=7` | Per-UTC-day usage for the last N days (1–90), newest first; daily buckets are kept 90 days |
 | `GET` | `/api/system/gpu` | Current GPU slot usage for both pools — interactive (`slots_*`) and reserved question-generation (`hq_slots_*`) |
 | `POST` | `/api/system/gpu/reset` | Rebuild both GPU slot queues to `GPU_CONCURRENCY` / `HQ_GPU_CONCURRENCY` tokens (use after a crash leaked slots) |
 | `GET` | `/api/system/audit?limit=100&offset=0` | Last N audit events across all apps, newest first |
@@ -537,7 +585,7 @@ All admin endpoints require HTTP Basic Auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD`
 
 ## Rate Limits
 
-All limits are per API key (falls back to IP for unauthenticated routes).
+All limits are per API key (falls back to client IP for values without the issued `praixis_` prefix). Requests with an **invalid** key are additionally capped at 30/minute per IP before returning `403` — beyond that they get `429`.
 
 | Endpoint | Limit |
 |---|---|
@@ -545,13 +593,20 @@ All limits are per API key (falls back to IP for unauthenticated routes).
 | `POST /general-requests/file_summary` | 5 / minute |
 | `GET /general-requests/chat/sessions/active` | 60 / minute |
 | `GET /general-requests/chat/{session_id}` | 60 / minute |
+| `GET /general-requests/chat/{session_id}/usage` | 60 / minute |
+| `POST /general-requests/chat/{session_id}/compact` | 10 / minute |
+| `DELETE /general-requests/chat/{session_id}/last` | 30 / minute |
 | `DELETE /general-requests/chat/{session_id}` | 30 / minute |
 | `POST /rag-db/upload` | 15 / minute |
+| `POST /rag-db/upload_text` | 15 / minute |
 | `POST /rag-db/ask` | 30 / minute |
 | `POST /rag-db/search` | 30 / minute |
 | `POST /rag-db/embed` | 60 / minute |
 | `GET /rag-db/list` | 60 / minute |
 | `GET /rag-db/{collection}/files` | 60 / minute |
+| `GET /rag-db/{collection}/files/{filename}/chunks` | 30 / minute |
+| `GET /rag-db/{collection}/files/{filename}/questions` | 60 / minute |
+| `POST /rag-db/{collection}/files/{filename}/questions` | 10 / minute |
 | `GET /rag-db/knowledge_base/.../summary` | 10 / minute |
 | `POST /rag-db/knowledge_base/compare` | 5 / minute |
 | `DELETE /rag-db/delete/{collection}` | 20 / minute |

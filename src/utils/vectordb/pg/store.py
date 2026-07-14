@@ -10,7 +10,7 @@ import asyncpg
 
 from src.utils.vectordb.base import StaleChunksError, VectorStore
 from src.utils.vectordb.pg import collections, ingestion, pool, retrieval
-from src.utils.vectordb.pg.constants import INSERT_QUESTION
+from src.utils.vectordb.pg.constants import COUNT_CHUNKS, COUNT_QUESTIONS, DELETE_QUESTIONS, INSERT_QUESTION
 
 
 class PgVectorStore(VectorStore):
@@ -98,6 +98,12 @@ class PgVectorStore(VectorStore):
             # being generated; the FK keeps the index consistent for us.
             raise StaleChunksError(str(e)) from e
 
+    async def delete_questions(self, app_name: str, collection_name: str, source: str) -> None:
+        await pool.get_pool().execute(DELETE_QUESTIONS, app_name, collection_name, source)
+
+    async def count_questions(self, app_name: str, collection_name: str, source: str) -> int:
+        return int(await pool.get_pool().fetchval(COUNT_QUESTIONS, app_name, collection_name, source))
+
     # ── Retrieval ─────────────────────────────────────────────────────────────
 
     async def query(
@@ -124,3 +130,9 @@ class PgVectorStore(VectorStore):
 
     async def full_document(self, collection_name: str, app_name: str, filename: str) -> str:
         return await retrieval.get_full_document_text(collection_name, app_name, filename)
+
+    async def file_chunks(self, collection_name: str, app_name: str, filename: str) -> list[dict]:
+        return await retrieval.get_file_chunks(collection_name, app_name, filename)
+
+    async def count_chunks(self, collection_name: str, app_name: str, filename: str) -> int:
+        return int(await pool.get_pool().fetchval(COUNT_CHUNKS, app_name, collection_name, filename))

@@ -5,6 +5,7 @@ persist the user's message, stream the completion token-by-token, and persist
 the assistant's (possibly partial) reply when the stream ends. The GPU slot is
 owned by ``SlotReleasingStreamingResponse`` in the controller, not here.
 """
+import asyncio
 from collections.abc import AsyncGenerator
 
 from src.config import MODEL_NAME as _MODEL_NAME
@@ -14,6 +15,10 @@ from src.utils.store.sessions import get_or_create_session, persist_history
 from src.utils.system.logger import logger
 
 _client = get_async_ai_client()
+
+# Strong references to in-flight persistence tasks: a persist started inside a
+# cancelled scope (client disconnect) must survive its caller and complete.
+_persist_tasks: set[asyncio.Task] = set()
 
 
 async def open_user_turn(
@@ -63,6 +68,14 @@ async def stream_assistant_turn(
     persisted into the conversation. A persistence failure in the ``finally``
     is logged rather than raised so it cannot mask the stream's own outcome.
     """
+    def _on_persist_done(task: asyncio.Task) -> None:
+        _persist_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning(
+                f"Failed to persist assistant reply for session {session_id} "
+                f"(app: {app_name}): {task.exception()}"
+            )
+
     full_response = ""
     try:
         response = await _client.chat.completions.create(  # type: ignore[call-overload]
@@ -84,9 +97,19 @@ async def stream_assistant_turn(
     finally:
         if full_response:
             history.append({"role": "assistant", "content": full_response})
+            # A client disconnect cancels this generator's scope, and a bare
+            # await here would be interrupted before the write completes. Run
+            # the persist as a shielded task (same pattern as
+            # ``SlotHandle.release``) so the partial reply is saved regardless;
+            # failures are logged by the done callback, never raised.
+            task = asyncio.ensure_future(
+                persist_history(app_name=app_name, session_id=session_id, history=history)
+            )
+            _persist_tasks.add(task)
+            task.add_done_callback(_on_persist_done)
             try:
-                await persist_history(app_name=app_name, session_id=session_id, history=history)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to persist assistant reply for session {session_id} (app: {app_name}): {e}"
-                )
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                raise  # the persist task itself continues in the background
+            except Exception:
+                pass  # already logged by _on_persist_done

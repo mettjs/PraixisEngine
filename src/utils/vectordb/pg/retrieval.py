@@ -17,6 +17,7 @@ from src.utils.vectordb.fusion import (
 )
 from src.utils.vectordb.pg.constants import (
     COLLECTION_EXISTS,
+    FILE_CHUNKS,
     FULL_DOCUMENT,
     HYBRID_SEARCH,
     QUESTION_SEARCH,
@@ -129,3 +130,10 @@ async def get_full_document_text(collection_name: str, app_name: str, filename: 
     if not rows:
         raise ValueError(f"No chunks found for document '{filename}' in this collection.")
     return "\n\n".join(r["content"] for r in rows)
+
+
+async def get_file_chunks(collection_name: str, app_name: str, filename: str) -> list[dict]:
+    rows = await get_pool().fetch(FILE_CHUNKS, app_name, collection_name, filename)
+    if not rows:
+        raise ValueError(f"No chunks found for document '{filename}' in this collection.")
+    return [{"id": r["id"], "chunk_index": r["chunk_index"], "content": r["content"]} for r in rows]

@@ -103,6 +103,10 @@ INSERT_QUESTION = """
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 """
 
+DELETE_QUESTIONS = "DELETE FROM chunk_questions WHERE app = $1 AND collection = $2 AND source = $3"
+
+COUNT_QUESTIONS = "SELECT COUNT(*) FROM chunk_questions WHERE app = $1 AND collection = $2 AND source = $3"
+
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 
 FULL_DOCUMENT = """
@@ -110,6 +114,14 @@ FULL_DOCUMENT = """
     WHERE app = $1 AND collection = $2 AND source = $3
     ORDER BY chunk_index
 """
+
+FILE_CHUNKS = """
+    SELECT id, chunk_index, content FROM chunks
+    WHERE app = $1 AND collection = $2 AND source = $3
+    ORDER BY chunk_index
+"""
+
+COUNT_CHUNKS = "SELECT COUNT(*) FROM chunks WHERE app = $1 AND collection = $2 AND source = $3"
 
 # Hybrid RRF: dense cosine + sparse FTS merged with Reciprocal Rank Fusion.
 # $1=embedding  $2=app  $3=collection  $4=fetch_limit  $5=question

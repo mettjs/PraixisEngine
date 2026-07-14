@@ -21,7 +21,8 @@
           <svg class="w-5 h-5 text-green-400"><use href="#ic-check"/></svg>
         </div>
         <div>
-          <h3 class="font-semibold text-slate-100">Key Generated Successfully</h3>
+          <h3 class="font-semibold text-slate-100"
+              x-text="modalData.revoked_key_hash ? 'Key Rotated Successfully' : 'Key Generated Successfully'"></h3>
           <p class="text-xs text-slate-400" x-text="'App: ' + (modalData.app_name || '')"></p>
         </div>
       </div>
@@ -29,6 +30,16 @@
 
     <!-- Body -->
     <div class="px-6 py-5 space-y-4">
+
+      <!-- Rotation failed to revoke the old key -->
+      <div x-show="modalData.old_key_revoked === false"
+           class="flex items-start gap-2.5 bg-red-500/10 border border-red-500/25 rounded-lg p-3.5">
+        <svg class="w-4 h-4 text-red-400 shrink-0 mt-0.5"><use href="#ic-warn"/></svg>
+        <p class="text-sm text-red-300">
+          The new key is live, but the <strong>old key could not be revoked</strong>.
+          Revoke it manually from the key list.
+        </p>
+      </div>
 
       <!-- One-time warning -->
       <div class="flex items-start gap-2.5 bg-amber-500/10 border border-amber-500/25 rounded-lg p-3.5">

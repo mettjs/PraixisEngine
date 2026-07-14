@@ -58,6 +58,12 @@
 
               <td class="td text-right">
                 <div class="flex items-center justify-end gap-2">
+                  <button @click="openRotateModal(key)"
+                          class="btn-sm bg-slate-700 hover:bg-slate-600 text-slate-300"
+                          title="Issue a new key, then revoke this one (no downtime)">
+                    <svg class="w-3.5 h-3.5"><use href="#ic-refresh"/></svg>
+                    Rotate
+                  </button>
                   <button @click="openWipeSessionsModal(key)"
                           class="btn-sm bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20"
                           title="Wipe all active sessions for this app">

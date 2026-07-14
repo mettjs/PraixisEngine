@@ -10,7 +10,11 @@ function _adminUsage() {
           const d          = await r.json();
           this.usage       = (d.apps || []).sort((a, b) => b.total_tokens - a.total_tokens);
           this.usageLoaded = true;
+        } else if (r.status !== 401) {
+          this.showToast('Failed to load usage data.', 'error');
         }
+      } catch {
+        this.showToast('Failed to load usage data — network error.', 'error');
       } finally {
         this.loading.usage = false;
       }

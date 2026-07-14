@@ -81,6 +81,12 @@ class ChromaStore(VectorStore):
     ) -> None:
         await ingestion.store_questions(app_name, collection_name, source, entries)
 
+    async def delete_questions(self, app_name: str, collection_name: str, source: str) -> None:
+        await collections.delete_questions_for_file(collection_name, app_name, source)
+
+    async def count_questions(self, app_name: str, collection_name: str, source: str) -> int:
+        return await collections.count_questions_for_file(collection_name, app_name, source)
+
     # ── Retrieval ─────────────────────────────────────────────────────────────
 
     async def query(
@@ -107,3 +113,9 @@ class ChromaStore(VectorStore):
 
     async def full_document(self, collection_name: str, app_name: str, filename: str) -> str:
         return await retrieval.get_full_document_text(collection_name, app_name, filename)
+
+    async def file_chunks(self, collection_name: str, app_name: str, filename: str) -> list[dict]:
+        return await retrieval.get_file_chunks(collection_name, app_name, filename)
+
+    async def count_chunks(self, collection_name: str, app_name: str, filename: str) -> int:
+        return await collections.count_chunks_for_file(collection_name, app_name, filename)

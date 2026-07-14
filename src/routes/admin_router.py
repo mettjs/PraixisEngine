@@ -4,6 +4,8 @@ from src.controllers.admin_controller import (
     generate_api_key,
     get_all_usage,
     get_app_usage,
+    get_app_daily_usage,
+    rotate_api_key,
     get_health_status,
     get_redis_health,
     get_vectordb_health,
@@ -79,6 +81,13 @@ async def create_app_key(app_name: str = Query(..., pattern=r"^[a-zA-Z0-9_-]{3,6
     return await generate_api_key(app_name)
 
 
+@router.post("/keys/rotate")
+async def rotate_app_key(key_hash: str = Query(..., description="Hash of the key to replace (see GET /keys).")):
+    """Issues a new key for the app owning ``key_hash``, then revokes the old
+    one — the app never has a window with zero valid keys."""
+    return await rotate_api_key(key_hash)
+
+
 @router.delete("/keys/revoke-by-hash")
 async def delete_app_key_by_hash(key_hash: str):
     return await revoke_api_key_by_hash(key_hash)
@@ -97,6 +106,15 @@ async def all_usage():
 @router.get("/usage/{app_name}")
 async def app_usage(app_name: str):
     return await get_app_usage(app_name)
+
+
+@router.get("/usage/{app_name}/daily")
+async def app_usage_daily(
+    app_name: str,
+    days: int = Query(default=7, ge=1, le=90, description="How many UTC days back to report, most recent first."),
+):
+    """Per-day token/request counts (kept 90 days), alongside the lifetime totals."""
+    return await get_app_daily_usage(app_name, days=days)
 
 
 @router.get("/gpu")

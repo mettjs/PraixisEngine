@@ -1,10 +1,15 @@
 import asyncio
-import secrets
 from fastapi import HTTPException
 from src.utils.store.client import redis_client
 from src.utils.store.sessions import delete_all_app_sessions
-from src.utils.store.usage import get_usage, get_all_app_names
-from src.utils.store.api_keys import store_api_key, remove_api_key_by_hash, list_all_api_keys
+from src.utils.store.usage import get_usage, get_all_app_names, get_daily_usage
+from src.utils.store.api_keys import (
+    store_api_key,
+    remove_api_key_by_hash,
+    list_all_api_keys,
+    get_api_key_entry,
+    new_api_key,
+)
 from src.utils.vectordb import get_vector_store
 from src.utils.ai_client import get_async_ai_client
 from src.utils.concurrency import get_gpu_status, reset_gpu_counter
@@ -51,8 +56,11 @@ async def get_health_status() -> dict:
 
 async def get_system_stats() -> dict:
     async def _count_sessions():
+        # Sessions expire via TTL, so a maintained counter would drift; a
+        # cursor SCAN stays exact. The large COUNT hint keeps it to ~one
+        # round-trip per 1000 keys instead of Redis's default of 10.
         count = 0
-        async for _ in redis_client.scan_iter("chat:*"):
+        async for _ in redis_client.scan_iter("chat:*", count=1000):
             count += 1
         return count
 
@@ -68,8 +76,7 @@ async def get_system_stats() -> dict:
 
 
 async def generate_api_key(app_name: str) -> dict:
-    raw_key = secrets.token_urlsafe(32)
-    full_key = f"praixis_{raw_key}"
+    full_key = new_api_key()
     await store_api_key(full_key, app_name)
     await log_event("KEY_GENERATED", {"app_name": app_name})
     logger.info(f"Generated new API Key for app: {app_name}")
@@ -89,6 +96,41 @@ async def delete_app_sessions(app_name: str) -> dict:
     return {"status": "success", "sessions_deleted": count, "app_name": app_name}
 
 
+async def rotate_api_key(key_hash: str) -> dict:
+    """Replaces a key in one call: the new key goes live before the old one is
+    revoked, so the app never has a window with zero valid keys."""
+    entry = await get_api_key_entry(key_hash)
+    app_name = (entry or {}).get("app_name")
+    if not app_name:
+        raise HTTPException(status_code=404, detail="API Key not found.")
+    full_key = new_api_key()
+    await store_api_key(full_key, app_name)
+    # From here the new key is live. A failure must not become a 500 that never
+    # delivers it — the caller would retry and mint yet another key while the
+    # stored one sits orphaned. Report the revocation outcome instead.
+    old_key_revoked = False
+    try:
+        await remove_api_key_by_hash(key_hash)
+        old_key_revoked = True
+        await log_event("KEY_ROTATED", {"app_name": app_name, "old_key_hash_preview": key_hash[:8] + "..."})
+        logger.info(f"Rotated API Key for app: {app_name}")
+    except Exception as e:
+        logger.error(
+            f"Rotation stored a new key for app {app_name} but failed to revoke the old one ({key_hash[:8]}...): {e}"
+        )
+    return {
+        "app_name": app_name,
+        "api_key": full_key,
+        "revoked_key_hash": key_hash,
+        "old_key_revoked": old_key_revoked,
+        "message": (
+            "Store this key safely. It will not be shown again. The old key is revoked."
+            if old_key_revoked
+            else "Store this key safely. It will not be shown again. WARNING: revoking the old key failed — revoke it manually by hash."
+        ),
+    }
+
+
 async def revoke_api_key_by_hash(key_hash: str) -> dict:
     deleted = await remove_api_key_by_hash(key_hash)
     if not deleted:
@@ -100,6 +142,10 @@ async def revoke_api_key_by_hash(key_hash: str) -> dict:
 
 async def get_app_usage(app_name: str) -> dict:
     return await get_usage(app_name)
+
+
+async def get_app_daily_usage(app_name: str, days: int = 7) -> dict:
+    return {"app_name": app_name, "days": await get_daily_usage(app_name, days=days)}
 
 
 async def get_all_usage() -> dict:

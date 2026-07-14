@@ -109,6 +109,14 @@ class VectorStore(ABC):
         Raises :class:`StaleChunksError` when the parent chunks are gone.
         """
 
+    @abstractmethod
+    async def delete_questions(self, app_name: str, collection_name: str, source: str) -> None:
+        """Removes every stored question for a file. No-op when there are none."""
+
+    @abstractmethod
+    async def count_questions(self, app_name: str, collection_name: str, source: str) -> int:
+        """Number of stored hypothetical questions for a file."""
+
     # ── Retrieval ─────────────────────────────────────────────────────────────
 
     @abstractmethod
@@ -139,3 +147,16 @@ class VectorStore(ABC):
     async def full_document(self, collection_name: str, app_name: str, filename: str) -> str:
         """The document's chunks re-joined in order.
         Raises ValueError when no chunks exist for the file."""
+
+    @abstractmethod
+    async def file_chunks(self, collection_name: str, app_name: str, filename: str) -> list[dict]:
+        """The document's stored chunk rows ordered by index, as dicts with
+        keys ``id``, ``chunk_index``, and ``content`` — the same shape
+        :meth:`add_file` returns, so they can seed question generation.
+        Raises ValueError when no chunks exist for the file."""
+
+    @abstractmethod
+    async def count_chunks(self, collection_name: str, app_name: str, filename: str) -> int:
+        """Number of stored chunks for a file, without fetching their content.
+        Returns 0 for an unknown file; may raise ValueError when the collection
+        itself does not exist (backends that can tell the difference)."""

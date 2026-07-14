@@ -14,7 +14,7 @@
       <!-- App -->
       <div>
         <label class="block text-xs text-slate-500 mb-1">App</label>
-        <select title="apps" x-model="vectorSearch.appName"
+        <select title="Select app" aria-label="App" x-model="vectorSearch.appName"
                 @change="vectorSearch.collection = ''; vectorSearch.done = false; vectorSearch.results = [];"
                 class="input">
           <option value="">— select app —</option>
@@ -27,7 +27,7 @@
       <!-- Collection -->
       <div>
         <label class="block text-xs text-slate-500 mb-1">Collection</label>
-        <select title="collection" x-model="vectorSearch.collection"
+        <select title="Select collection" aria-label="Collection" x-model="vectorSearch.collection"
                 :disabled="!vectorSearch.appName"
                 class="input disabled:opacity-40 disabled:cursor-not-allowed">
           <option value="">— select collection —</option>
@@ -40,7 +40,7 @@
       <!-- Results count -->
       <div>
         <label class="block text-xs text-slate-500 mb-1">Results</label>
-        <select title="results" x-model.number="vectorSearch.nResults" class="input">
+        <select title="Number of results" aria-label="Number of results" x-model.number="vectorSearch.nResults" class="input">
           <option :value="3">3</option>
           <option :value="5">5</option>
           <option :value="10">10</option>
@@ -50,7 +50,7 @@
 
       <!-- Search button -->
       <div class="flex items-end">
-        <button title="search" @click="runVectorSearch()"
+        <button title="Run semantic search" @click="runVectorSearch()"
                 :disabled="!vectorSearch.appName || !vectorSearch.collection || !vectorSearch.query.trim() || vectorSearch.loading"
                 class="btn-primary w-full justify-center">
           <template x-if="!vectorSearch.loading">

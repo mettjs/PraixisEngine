@@ -22,7 +22,11 @@ function _adminVector() {
           const d = await r.json();
           this.vectorCollections = d.collections || [];
           this.vectorLoaded      = true;
+        } else if (r.status !== 401) {
+          this.showToast('Failed to load collections.', 'error');
         }
+      } catch {
+        this.showToast('Failed to load collections — network error.', 'error');
       } finally {
         this.loading.vector = false;
       }

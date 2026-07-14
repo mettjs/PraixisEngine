@@ -4,13 +4,24 @@ except Exception as e:
     raise RuntimeError(f"ERROR: Could not load configuration: {e}")
 
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from slowapi.errors import RateLimitExceeded
-from src.utils.system.limiter import limiter
-from slowapi.extension import _rate_limit_exceeded_handler
 from src.routes.main_router import api_router
 from src.routes.ui_router import STATIC_DIR
+
+
+def _engine_version() -> str:
+    """pyproject.toml is the single source of truth for the version: installed
+    deployments read it from package metadata, source checkouts fall back to
+    parsing the file directly."""
+    try:
+        return _pkg_version("praixisengine")
+    except PackageNotFoundError:
+        import tomllib
+        from pathlib import Path
+        with (Path(__file__).parent / "pyproject.toml").open("rb") as f:
+            return tomllib.load(f)["project"]["version"]
 
 
 @asynccontextmanager
@@ -27,14 +38,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Praixis - Business logic based API",
     description="Custom decoupled business logic API powered by a local OpenAI-compatible LLM.",
-    version="2.1.0",
+    version=_engine_version(),
     docs_url="/swagger/docs",
     redoc_url="/docs",
     lifespan=lifespan,
 )
-
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 app.include_router(api_router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

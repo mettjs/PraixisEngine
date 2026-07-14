@@ -63,11 +63,15 @@ async def stream_llm(
             stream_options={"include_usage": True},
             **(extra or {}),
         )
+        usage_recorded = False
         async for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content is not None:
                 yield chunk.choices[0].delta.content
-            if getattr(chunk, "usage", None):
+            # Record once: a backend that attaches cumulative usage to more
+            # than one chunk would otherwise be double-counted.
+            if not usage_recorded and getattr(chunk, "usage", None):
                 await record_llm_usage(chunk, app_name, session_id=session_id)
+                usage_recorded = True
 
 
 async def map_calls_iter(

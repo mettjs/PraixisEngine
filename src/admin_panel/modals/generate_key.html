@@ -6,6 +6,7 @@
      x-transition:enter-start="opacity-0"
      x-transition:enter-end="opacity-100"
      @keydown.escape.window="modal = null"
+     @click.self="modal = null"
      class="modal-overlay">
 
   <div class="modal-box"
@@ -17,7 +18,7 @@
     <!-- Header -->
     <div class="flex items-center justify-between px-6 pt-6 pb-4 border-b border-slate-700">
       <h3 class="font-semibold text-slate-100">Generate API Key</h3>
-      <button title="generate api key" @click="modal = null" class="text-slate-500 hover:text-slate-300 transition-colors">
+      <button title="Close" aria-label="Close" @click="modal = null" class="text-slate-500 hover:text-slate-300 transition-colors">
         <svg class="w-5 h-5"><use href="#ic-x"/></svg>
       </button>
     </div>

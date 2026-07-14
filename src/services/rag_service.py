@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 from src.utils.file_parser import chunk_text
 from src.services.llm_runner import call_llm, map_calls_iter, stream_llm
 from src.services.session_stream import open_user_turn, stream_assistant_turn
+from src.utils.system.streaming import encode_source_list
 
 
 async def generate_rag_answer(
@@ -44,7 +45,7 @@ async def generate_rag_answer(
     yield f"[SESSION_ID:{active_session_id}]\n"
     yield f"[SEARCH_QUERY:{search_query}]\n"
     unique_sources = list({chunk["source"] for chunk in context_chunks})
-    yield f"[SOURCES:{','.join(unique_sources)}]\n"
+    yield f"[SOURCES:{encode_source_list(unique_sources)}]\n"
 
     extra: dict = {}
     if response_format == "json":

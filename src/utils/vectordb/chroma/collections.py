@@ -22,12 +22,12 @@ async def get_all_collections_admin() -> list[dict[str, Any]]:
             if not col.metadata or "app" not in col.metadata or _is_questions_index(col.metadata):
                 continue
             app = str(col.metadata["app"])
-            prefix = f"{app}_"
+            prefix = f"{app}."
             name = col.name[len(prefix):] if col.name.startswith(prefix) else col.name
             out.append({
                 "app_name": app,
                 "collection_name": name,
-                "chunk_count": get_client().get_collection(col.name).count(),
+                "chunk_count": col.count(),
             })
         return sorted(out, key=lambda c: (c["app_name"], c["collection_name"]))
 
@@ -53,7 +53,7 @@ async def collection_exists(collection_name: str, app_name: str) -> bool:
 
 async def list_all_collections(app_name: str) -> list[str]:
     def _run():
-        prefix = f"{app_name}_"
+        prefix = f"{app_name}."
         return [
             col.name[len(prefix):]
             for col in get_client().list_collections()
@@ -89,6 +89,33 @@ async def delete_collection(collection_name: str, app_name: str) -> bool:
         if get_questions_collection(collection_name, app_name) is not None:
             get_client().delete_collection(name=questions_name(app_name, collection_name))
         return True
+
+    return await asyncio.to_thread(_run)
+
+
+async def count_chunks_for_file(collection_name: str, app_name: str, source: str) -> int:
+    def _run():
+        collection = get_owned_collection(collection_name, app_name)
+        return len(collection.get(where={"source": source}, include=[]).get("ids") or [])
+
+    return await asyncio.to_thread(_run)
+
+
+async def delete_questions_for_file(collection_name: str, app_name: str, source: str) -> None:
+    def _run():
+        questions = get_questions_collection(collection_name, app_name)
+        if questions is not None:
+            questions.delete(where={"source": source})
+
+    await asyncio.to_thread(_run)
+
+
+async def count_questions_for_file(collection_name: str, app_name: str, source: str) -> int:
+    def _run():
+        questions = get_questions_collection(collection_name, app_name)
+        if questions is None:
+            return 0
+        return len(questions.get(where={"source": source}, include=[]).get("ids") or [])
 
     return await asyncio.to_thread(_run)
 

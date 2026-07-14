@@ -3,7 +3,7 @@ from pypdf import PdfReader
 import docx
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
+from src.config import MAX_FILE_SIZE  # noqa: F401 — re-exported; controllers import it from here
 
 _EXTENSION_KINDS = {".pdf": "pdf", ".docx": "docx", ".txt": "txt"}
 
@@ -62,16 +62,29 @@ def extract_text_from_file(filename: str, file_content: bytes, content_type: str
     text = ""
 
     if kind == "pdf":
-        pdf = PdfReader(io.BytesIO(file_content))
-        for page in pdf.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
+        try:
+            pdf = PdfReader(io.BytesIO(file_content))
+            for page in pdf.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + "\n"
+        except Exception as e:
+            raise ValueError("Unsupported or corrupted file: could not be parsed as PDF.") from e
 
     elif kind == "docx":
-        doc = docx.Document(io.BytesIO(file_content))
-        for para in doc.paragraphs:
-            text += para.text + "\n"
+        # Magic-byte detection maps every ZIP container here, so a non-DOCX
+        # ZIP (xlsx, pptx, jar, ...) lands in this branch and fails to parse.
+        # Surface that as the same clean "unsupported" error the caller maps
+        # to a 400, not an unhandled exception → 500.
+        try:
+            doc = docx.Document(io.BytesIO(file_content))
+            for para in doc.paragraphs:
+                text += para.text + "\n"
+        except Exception as e:
+            raise ValueError(
+                "Unsupported or corrupted file: could not be parsed as DOCX. "
+                "Please upload a PDF, DOCX, or TXT file."
+            ) from e
 
     elif kind == "txt":
         try:

@@ -155,6 +155,8 @@ function adminApp() {
     logout() {
       this.clearSession();
       this.isLoggedIn         = false;
+      this.modal              = null;
+      this.modalData          = {};
       this.loginUsername      = '';
       this.view               = 'dashboard';
       this.dashboardLoaded    = false;
@@ -176,7 +178,14 @@ function adminApp() {
     // ══════════════════════════════════════════════════════════════════════════
     async req(method, path, params = null) {
       const url = params ? path + '?' + new URLSearchParams(params) : path;
-      return fetch(url, { method, headers: { Authorization: 'Basic ' + this.authHeader } });
+      const r   = await fetch(url, { method, headers: { Authorization: 'Basic ' + this.authHeader } });
+      if (r.status === 401 && this.isLoggedIn) {
+        // Credentials changed server-side (e.g. restart with new admin creds):
+        // drop to the login screen instead of failing every call silently.
+        this.logout();
+        this.loginError = 'Session expired — please sign in again.';
+      }
+      return r;
     },
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -199,7 +208,14 @@ function adminApp() {
       if      (this.view === 'dashboard') { this.dashboardLoaded = false; await this.loadDashboard(); }
       else if (this.view === 'keys')      await this.loadKeys();
       else if (this.view === 'usage')     await this.loadUsage();
-      else if (this.view === 'vector')    { this.vectorFiles = {}; await this.loadVectorCollections(); }
+      else if (this.view === 'vector')    {
+        // Collapse any open row too — a row expanded over an empty file cache
+        // would render blank (neither loading nor list).
+        this.vectorFiles        = {};
+        this.vectorFilesLoading = {};
+        this.vectorExpanded     = null;
+        await this.loadVectorCollections();
+      }
       else if (this.view === 'audit')     { this.auditOffset = 0; this.auditEvents = []; await this.loadAudit(); }
     },
 

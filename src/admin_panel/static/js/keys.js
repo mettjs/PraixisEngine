@@ -1,4 +1,4 @@
-// API Keys view — generate, revoke, wipe sessions, reset GPU slots.
+// API Keys view — generate, rotate, revoke, wipe sessions, reset GPU slots.
 function _adminKeys() {
   return {
 
@@ -10,7 +10,11 @@ function _adminKeys() {
           const d         = await r.json();
           this.keys       = (d.keys || []).sort((a, b) => a.app_name.localeCompare(b.app_name));
           this.keysLoaded = true;
+        } else if (r.status !== 401) {
+          this.showToast('Failed to load API keys.', 'error');
         }
+      } catch {
+        this.showToast('Failed to load API keys — network error.', 'error');
       } finally {
         this.loading.keys = false;
       }
@@ -54,6 +58,33 @@ function _adminKeys() {
       }
     },
 
+    openRotateModal(key) {
+      this.modalData    = key;
+      this.modalLoading = false;
+      this.modal        = 'rotateKey';
+    },
+
+    async rotateKey() {
+      this.modalLoading = true;
+      try {
+        const r = await this.req('POST', '/api/system/keys/rotate', { key_hash: this.modalData.key_hash });
+        if (r.ok) {
+          this.modalData = await r.json();  // shows in the newKeyResult modal
+          this.modal     = 'newKeyResult';
+          await this.loadKeys();
+        } else {
+          const d = await r.json().catch(() => ({}));
+          this.showToast(d.detail || 'Rotate failed.', 'error');
+          this.modal = null;
+        }
+      } catch {
+        this.showToast('Rotate failed — network error.', 'error');
+        this.modal = null;
+      } finally {
+        this.modalLoading = false;
+      }
+    },
+
     openRevokeModal(key) {
       this.modalData    = key;
       this.modalLoading = false;
@@ -87,10 +118,7 @@ function _adminKeys() {
     async wipeSessions() {
       this.modalLoading = true;
       try {
-        const r = await fetch('/api/system/sessions/' + encodeURIComponent(this.modalData.app_name), {
-          method: 'DELETE',
-          headers: { Authorization: 'Basic ' + this.authHeader },
-        });
+        const r = await this.req('DELETE', '/api/system/sessions/' + encodeURIComponent(this.modalData.app_name));
         if (r.ok) {
           const d    = await r.json();
           this.modal = null;

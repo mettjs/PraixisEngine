@@ -59,10 +59,10 @@
             <template x-for="app in usage" :key="app.app_name">
               <tr class="hover:bg-slate-700/20 transition-colors">
                 <td class="td font-medium text-slate-100" x-text="app.app_name"></td>
-                <td class="td text-right" x-text="app.requests.toLocaleString()"></td>
-                <td class="td text-right text-slate-400" x-text="app.prompt_tokens.toLocaleString()"></td>
-                <td class="td text-right text-slate-400" x-text="app.completion_tokens.toLocaleString()"></td>
-                <td class="td text-right font-semibold text-slate-200" x-text="app.total_tokens.toLocaleString()"></td>
+                <td class="td text-right" x-text="(app.requests || 0).toLocaleString()"></td>
+                <td class="td text-right text-slate-400" x-text="(app.prompt_tokens || 0).toLocaleString()"></td>
+                <td class="td text-right text-slate-400" x-text="(app.completion_tokens || 0).toLocaleString()"></td>
+                <td class="td text-right font-semibold text-slate-200" x-text="(app.total_tokens || 0).toLocaleString()"></td>
                 <td class="td w-36">
                   <div class="flex items-center gap-2">
                     <div class="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">

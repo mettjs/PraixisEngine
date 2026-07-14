@@ -3,6 +3,7 @@ import uuid
 
 from src.utils.vectordb.base import StaleChunksError
 from src.utils.vectordb.chroma.client import (
+    ensure_name_fits,
     get_client,
     get_owned_collection,
     get_questions_collection,
@@ -39,6 +40,7 @@ async def add_file_to_rag_db(
     embeddings = await asyncio.to_thread(embed, chunks)
 
     def _run():
+        ensure_name_fits(app_name, collection_name)
         collection = get_client().get_or_create_collection(
             name=scoped_name(app_name, collection_name),
             metadata={"app": app_name},

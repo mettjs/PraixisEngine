@@ -88,6 +88,10 @@ def _fetch_range(collection, source: str, lo: int, hi: int) -> str:
     )
     docs = rows.get("documents") or []
     metas = rows.get("metadatas") or []
+    if len(metas) != len(docs):
+        # Metadata unavailable or misaligned — fall back to Chroma's order
+        # rather than risk dropping chunks via a truncated zip.
+        return "\n\n".join(docs)
     ordered = sorted(zip(docs, metas), key=lambda pair: pair[1].get("chunk_index", 0) if pair[1] else 0)
     return "\n\n".join(doc for doc, _ in ordered)
 
@@ -165,6 +169,30 @@ async def search_collection(
                     "score": round(1 / (1 + distance), 3) if distance is not None else None,
                 })
         return retrieved
+
+    return await asyncio.to_thread(_run)
+
+
+async def get_file_chunks(collection_name: str, app_name: str, filename: str) -> list[dict]:
+    def _run():
+        collection = get_owned_collection(collection_name, app_name)
+        rows = collection.get(where={"source": filename}, include=["documents", "metadatas"])
+        ids = rows.get("ids") or []
+        if not ids:
+            raise ValueError(f"No chunks found for document '{filename}' in this collection.")
+        docs = rows.get("documents") or []
+        metas = rows.get("metadatas") or []
+        out = [
+            {
+                "id": str(cid),
+                "chunk_index": int(meta.get("chunk_index", 0)) if meta else 0,
+                "content": doc,
+            }
+            for cid, doc, meta in zip(ids, docs, metas)
+        ]
+        # Chroma does not guarantee retrieval order; return original sequence.
+        out.sort(key=lambda r: r["chunk_index"])
+        return out
 
     return await asyncio.to_thread(_run)
 

@@ -27,6 +27,12 @@ _load_dotenv()
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+# --- Upload limits (constant, not env-derived) ---
+# One cap for every ingestion path: multipart file uploads and raw-text bodies.
+# Lives here so schema validation and the file parser share a single value
+# without the schemas module having to import the parser's heavy dependencies.
+MAX_FILE_SIZE: int = 20 * 1024 * 1024  # bytes
+
 # --- LLM backend ---
 AI_API_URL: str = os.getenv("AI_API_URL", "http://localhost:8081")
 AI_API_KEY: str = os.getenv("AI_API_KEY", "")

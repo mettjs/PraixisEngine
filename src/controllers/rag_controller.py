@@ -1,15 +1,16 @@
 import asyncio
 from fastapi import HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from src.models.schemas import EmbedRequest, QuestionRequest, SearchRequest
+from src.config import HQ_ENABLED
+from src.models.schemas import EmbedRequest, QuestionRequest, SearchRequest, TextUploadRequest
 from src.services.rag_service import generate_comparison, generate_rag_answer, generate_summary, reformulate_query
 from src.utils.file_parser import extract_text_from_file, MAX_FILE_SIZE
 from src.utils.vectordb import get_vector_store
 from src.utils.vectordb.embeddings import get_embedding
-from src.utils.vectordb.questions import schedule_question_generation
+from src.utils.vectordb.questions import is_generation_pending, schedule_question_generation
 from src.utils.store.sessions import get_session_history
 from src.utils.system.logger import logger
-from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json
+from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json, guard_stream
 from src.utils.concurrency import GPUBusyError, acquire_gpu_slot
 from src.utils.store.audit import log_event
 
@@ -100,7 +101,7 @@ async def handle_rag_upload(
             # generate hypothetical questions in the background so the upload
             # response is not blocked on LLM generation.
             if improved_search:
-                schedule_question_generation(
+                await schedule_question_generation(
                     app_name=app_name,
                     collection_name=collection_name,
                     source=file.filename,
@@ -116,6 +117,118 @@ async def handle_rag_upload(
             results.append({"filename": file.filename, "status": "error", "detail": "Internal error."})
     success_count = sum(1 for r in results if r["status"] == "success")
     return {"collection_name": collection_name, "processed": len(results), "succeeded": success_count, "results": results}
+
+
+async def handle_upload_text(request: TextUploadRequest, app_name: str) -> dict:
+    """Raw-text ingestion: same pipeline as a file upload, minus the multipart
+    parsing — for callers that already hold text (scraped pages, DB records)."""
+    if request.chunking_strategy == "character" and request.chunk_overlap >= request.chunk_size:
+        raise HTTPException(status_code=422, detail="chunk_overlap must be less than chunk_size.")
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text is empty.")
+    try:
+        chunk_rows = await get_vector_store().add_file(
+            text=request.text,
+            collection_name=request.collection_name,
+            filename=request.filename,
+            app_name=app_name,
+            chunk_size=request.chunk_size,
+            chunk_overlap=request.chunk_overlap,
+            chunking_strategy=request.chunking_strategy,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Text upload error for {request.filename} (app: {app_name}): {e}")
+        raise HTTPException(status_code=500, detail="Internal error.")
+    if request.improved_search:
+        await schedule_question_generation(
+            app_name=app_name,
+            collection_name=request.collection_name,
+            source=request.filename,
+            chunks=chunk_rows,
+        )
+    logger.info(f"Uploaded text as {request.filename} to collection: {request.collection_name} for app: {app_name}")
+    await log_event("FILE_UPLOADED", {"filename": request.filename, "collection": request.collection_name, "via": "text"}, app_name=app_name)
+    return {
+        "status": "success",
+        "collection_name": request.collection_name,
+        "filename": request.filename,
+        "chunks_stored": len(chunk_rows),
+        "improved_search": request.improved_search,
+    }
+
+
+async def handle_file_chunks(collection_name: str, filename: str, app_name: str) -> dict:
+    try:
+        chunks = await get_vector_store().file_chunks(collection_name=collection_name, app_name=app_name, filename=filename)
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Error in handle_file_chunks: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal error.")
+    logger.info(f"Listed {len(chunks)} chunks of {filename} in collection: {collection_name} for app: {app_name}")
+    return {
+        "status": "success",
+        "collection_name": collection_name,
+        "filename": filename,
+        "total_chunks": len(chunks),
+        "chunks": [{"chunk_index": c["chunk_index"], "content": c["content"]} for c in chunks],
+    }
+
+
+async def handle_regenerate_questions(collection_name: str, filename: str, app_name: str) -> dict:
+    """Backfills (or rebuilds) the hypothetical-question index for a stored file,
+    so `improved_search` is no longer a decision locked in at upload time."""
+    store = get_vector_store()
+    if not HQ_ENABLED or not store.supports_questions:
+        raise HTTPException(status_code=400, detail="Hypothetical-question indexing is disabled on this deployment.")
+    try:
+        chunks = await store.file_chunks(collection_name=collection_name, app_name=app_name, filename=filename)
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Error in handle_regenerate_questions: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal error.")
+    # exclusive=True makes the already-running check atomic (SET NX on the
+    # pending marker), so concurrent regenerate requests cannot both schedule.
+    # purge_existing=True replaces the old index only once the new pass has
+    # results, so a failed pass never strips a file of its working questions.
+    scheduled = await schedule_question_generation(
+        app_name=app_name, collection_name=collection_name, source=filename, chunks=chunks,
+        exclusive=True, purge_existing=True,
+    )
+    if not scheduled:
+        raise HTTPException(status_code=409, detail="Question generation for this file is already running.")
+    logger.info(f"Scheduled question regeneration for {filename} in collection: {collection_name} for app: {app_name}")
+    await log_event("QUESTIONS_REGENERATED", {"filename": filename, "collection": collection_name}, app_name=app_name)
+    return {"status": "scheduled", "collection_name": collection_name, "filename": filename, "chunks": len(chunks)}
+
+
+async def handle_question_status(collection_name: str, filename: str, app_name: str) -> dict:
+    store = get_vector_store()
+    try:
+        # A count, not file_chunks: this is a poll endpoint and must not drag
+        # every chunk's content out of the store just to report a total.
+        total = await store.count_chunks(collection_name=collection_name, app_name=app_name, filename=filename)
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Error in handle_question_status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal error.")
+    if total == 0:
+        raise HTTPException(status_code=404, detail=f"No chunks found for document '{filename}' in this collection.")
+    stored, pending = await asyncio.gather(
+        store.count_questions(app_name=app_name, collection_name=collection_name, source=filename),
+        is_generation_pending(app_name=app_name, collection_name=collection_name, source=filename),
+    )
+    return {
+        "collection_name": collection_name,
+        "filename": filename,
+        "total_chunks": total,
+        "questions_stored": stored,
+        "generation_pending": pending,
+    }
 
 
 async def handle_rag_question(request: QuestionRequest, app_name: str) -> StreamingResponse | dict:
@@ -173,7 +286,7 @@ async def handle_rag_question(request: QuestionRequest, app_name: str) -> Stream
     try:
         if request.stream:
             logger.info(f"Streaming RAG answer for app: {app_name}, collection: {request.collection_name}")
-            return SlotReleasingStreamingResponse(answer, slot=slot, media_type="text/event-stream")
+            return SlotReleasingStreamingResponse(guard_stream(answer), slot=slot, media_type="text/event-stream")
         logger.info(f"Buffering RAG answer for app: {app_name}, collection: {request.collection_name}")
         try:
             return await drain_to_json(answer)
@@ -213,15 +326,8 @@ async def handle_summarize_document(
         logger.info(f"Generated {filename} summary for app: {app_name}")
         return body
 
-    async def _guarded():
-        try:
-            async for piece in _summary_with_header():
-                yield piece
-        except GPUBusyError as e:
-            yield f"[ERROR:{e}]\n"
-
     logger.info(f"Streaming {filename} summary for app: {app_name}")
-    return StreamingResponse(_guarded(), media_type="text/event-stream")
+    return StreamingResponse(guard_stream(_summary_with_header()), media_type="text/event-stream")
 
 
 async def handle_compare_documents(
@@ -255,15 +361,8 @@ async def handle_compare_documents(
         # Echo the request's filenames alongside the generated content.
         return {"file_1": file_1, "file_2": file_2, **body}
 
-    async def _guarded():
-        try:
-            async for piece in comparison:
-                yield piece
-        except GPUBusyError as e:
-            yield f"[ERROR:{e}]\n"
-
     logger.info(f"Streaming comparison between {file_1} and {file_2} for app: {app_name}")
-    return StreamingResponse(_guarded(), media_type="text/event-stream")
+    return StreamingResponse(guard_stream(comparison), media_type="text/event-stream")
 
 
 async def handle_vector_search(request: SearchRequest, app_name: str) -> dict:
