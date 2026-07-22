@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from src.routes.main_router import api_router
 from src.routes.ui_router import STATIC_DIR
+from src.utils.system.openapi import setup_openapi
 
 
 def _engine_version() -> str:
@@ -46,6 +47,7 @@ app = FastAPI(
 
 app.include_router(api_router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+setup_openapi(app)  # render UploadFile params as file pickers in Swagger UI
 
 if __name__ == "__main__":
     import uvicorn
