@@ -34,6 +34,40 @@
              pattern="[a-zA-Z0-9_\-]{3,63}" />
       <p class="text-xs text-slate-600 mt-1.5">Letters, numbers, hyphens and underscores. 3–63 characters.</p>
       <p x-show="newAppNameError" class="text-xs text-red-400 mt-1" x-text="newAppNameError"></p>
+
+      <!-- Model scope. Shown only when there is more than one model to choose
+           between: a single-model deployment has nothing to scope. -->
+      <div x-show="registry.models.length > 1" class="mt-5">
+        <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Models</label>
+        <div class="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+          <template x-for="m in registry.models" :key="m.id">
+            <label class="flex items-center gap-2.5 px-3 py-2 bg-slate-900/40 border border-slate-700/60 rounded cursor-pointer hover:border-slate-600">
+              <input type="checkbox"
+                     :checked="newKeyModels.includes(m.id)"
+                     @change="toggleNewKeyModel(m.id)"
+                     class="accent-brand" />
+              <span class="text-sm font-mono text-slate-200" x-text="m.id"></span>
+              <span class="text-[10px] font-mono text-slate-500" x-text="m.model"></span>
+              <span x-show="m.id === registry.default"
+                    class="ml-auto text-[10px] font-mono text-slate-500">registry default</span>
+            </label>
+          </template>
+        </div>
+        <p class="text-xs text-slate-600 mt-1.5">
+          Leave all unchecked to allow every model. Checked models are the only ones this key may use.
+        </p>
+
+        <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mt-4 mb-1.5">Default Model</label>
+        <select x-model="newKeyDefaultModel" class="input">
+          <option value="">Registry default</option>
+          <template x-for="m in registry.models" :key="'def-' + m.id">
+            <option :value="m.id"
+                    x-show="!newKeyModels.length || newKeyModels.includes(m.id)"
+                    x-text="m.id"></option>
+          </template>
+        </select>
+        <p class="text-xs text-slate-600 mt-1.5">What this key gets when a request names no model.</p>
+      </div>
     </div>
 
     <!-- Footer -->

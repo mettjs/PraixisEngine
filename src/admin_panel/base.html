@@ -42,6 +42,7 @@
       <main class="flex-1 overflow-y-auto p-6 space-y-6">
         {% include "views/dashboard.html" %}
         {% include "views/keys.html" %}
+        {% include "views/models.html" %}
         {% include "views/usage.html" %}
         {% include "views/vector.html" %}
         {% include "views/audit.html" %}
@@ -56,6 +57,7 @@
   {% include "modals/revoke_key.html" %}
   {% include "modals/wipe_sessions.html" %}
   {% include "modals/reset_gpu.html" %}
+  {% include "modals/remove_registry.html" %}
   {% include "modals/delete_collection.html" %}
   {% include "modals/delete_file.html" %}
 
@@ -65,6 +67,7 @@
   <script src="/static/js/helpers.js"></script>
   <script src="/static/js/dashboard.js"></script>
   <script src="/static/js/keys.js"></script>
+  <script src="/static/js/models.js"></script>
   <script src="/static/js/usage.js"></script>
   <script src="/static/js/audit.js"></script>
   <script src="/static/js/vector.js"></script>

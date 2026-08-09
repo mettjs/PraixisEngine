@@ -13,6 +13,7 @@ from src.utils.system.logger import logger
 from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json, guard_stream
 from src.utils.concurrency import GPUBusyError, acquire_gpu_slot
 from src.utils.store.audit import log_event
+from src.dependencies.models import resolve_model_or_400, resolve_request_model
 
 
 async def handle_list_collections(app_name: str) -> dict:
@@ -231,7 +232,13 @@ async def handle_question_status(collection_name: str, filename: str, app_name: 
     }
 
 
-async def handle_rag_question(request: QuestionRequest, app_name: str) -> StreamingResponse | dict:
+async def handle_rag_question(
+    request: QuestionRequest, app_name: str, caller_entry: dict | None = None
+) -> StreamingResponse | dict:
+    # Resolved first: an unknown model must not cost a reformulation call.
+    spec = await resolve_request_model(
+        request.model, app_name=app_name, caller_entry=caller_entry, session_id=request.session_id
+    )
     # Check the collection before any LLM work, so a typo'd name is a clean 404
     # instead of a burned reformulation call and a streamed non-answer.
     if not await get_vector_store().collection_exists(collection_name=request.collection_name, app_name=app_name):
@@ -265,7 +272,7 @@ async def handle_rag_question(request: QuestionRequest, app_name: str) -> Stream
         )
 
     try:
-        slot = await acquire_gpu_slot()
+        slot = await acquire_gpu_slot(spec.pool)
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -274,6 +281,8 @@ async def handle_rag_question(request: QuestionRequest, app_name: str) -> Stream
         app_name=app_name,
         context_chunks=relevant_chunks,
         search_query=search_query,
+        spec=spec,
+        model_was_explicit=request.model is not None,
         session_id=request.session_id,
         system_prompt=request.system_prompt,
         response_format=request.response_format,
@@ -298,8 +307,10 @@ async def handle_rag_question(request: QuestionRequest, app_name: str) -> Stream
 
 
 async def handle_summarize_document(
-    collection_name: str, filename: str, app_name: str, stream: bool = False, response_format: str = "text"
+    collection_name: str, filename: str, app_name: str, model: str | None = None,
+    caller_entry: dict | None = None, stream: bool = False, response_format: str = "text",
 ) -> StreamingResponse | dict:
+    spec = resolve_model_or_400(model, caller_entry)
     try:
         document_text = await get_vector_store().full_document(collection_name=collection_name, app_name=app_name, filename=filename)
     except GPUBusyError as e:
@@ -312,7 +323,10 @@ async def handle_summarize_document(
     # pre-acquire here.
     async def _summary_with_header():
         yield f"[FILE:{filename}]\n"
-        async for piece in generate_summary(document_text, app_name=app_name, response_format=response_format):
+        yield f"[MODEL:{spec.id}]\n"
+        async for piece in generate_summary(
+            document_text, app_name=app_name, spec=spec, response_format=response_format
+        ):
             yield piece
 
     if not stream:
@@ -331,8 +345,10 @@ async def handle_summarize_document(
 
 
 async def handle_compare_documents(
-    collection_name: str, file_1: str, file_2: str, app_name: str, stream: bool = False, response_format: str = "text"
+    collection_name: str, file_1: str, file_2: str, app_name: str, model: str | None = None,
+    caller_entry: dict | None = None, stream: bool = False, response_format: str = "text",
 ) -> StreamingResponse | dict:
+    spec = resolve_model_or_400(model, caller_entry)
     try:
         store = get_vector_store()
         doc1_text, doc2_text = await asyncio.gather(
@@ -347,7 +363,17 @@ async def handle_compare_documents(
 
     # generate_comparison self-acquires a GPU slot per LLM call, so we must NOT
     # pre-acquire here.
-    comparison = generate_comparison(doc1_text, doc2_text, file_1, file_2, app_name=app_name, response_format=response_format)
+    async def _comparison_with_header():
+        # Same contract as the other generating endpoints: say which model ran,
+        # before any content.
+        yield f"[MODEL:{spec.id}]\n"
+        async for piece in generate_comparison(
+            doc1_text, doc2_text, file_1, file_2, app_name=app_name, spec=spec,
+            response_format=response_format,
+        ):
+            yield piece
+
+    comparison = _comparison_with_header()
 
     if not stream:
         try:

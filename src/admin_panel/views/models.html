@@ -1,0 +1,207 @@
+<!-- ═══════════════════════════════════════════════════════
+     MODELS VIEW — the LLM registry: what is serving, and what models.yaml says
+     ═══════════════════════════════════════════════════════ -->
+<div x-show="view === 'models'">
+
+  <!-- Loading spinner -->
+  <div x-show="loading.models && !modelsLoaded" class="flex justify-center py-12">
+    <span class="spinner text-slate-500 w-6 h-6 border-2"></span>
+  </div>
+
+  <div x-show="!loading.models || modelsLoaded" class="space-y-5">
+
+    <!-- Saved ≠ serving. The engine reads models.yaml once at startup and
+         derives its GPU pools from it, so this banner is the whole reason the
+         view can be honest about what a save did. -->
+    <div x-show="restartRequired"
+         class="flex items-start gap-2.5 bg-amber-500/10 border border-amber-500/25 rounded-lg p-3.5">
+      <svg class="w-4 h-4 text-amber-400 shrink-0 mt-0.5"><use href="#ic-warn"/></svg>
+      <div class="text-sm text-amber-300">
+        <strong>Restart required.</strong>
+        models.yaml has changed. This engine is still serving the registry it started with —
+        restart it (<code class="text-xs">docker compose restart api</code>) to apply the saved file.
+      </div>
+    </div>
+
+    <!-- models.yaml exists but is unreadable. Saving would overwrite something
+         recoverable, so the editor refuses until it is fixed on disk. -->
+    <div x-show="hasBrokenRegistryFile()"
+         class="flex items-start gap-2.5 bg-red-500/10 border border-red-500/25 rounded-lg p-3.5">
+      <svg class="w-4 h-4 text-red-400 shrink-0 mt-0.5"><use href="#ic-warn"/></svg>
+      <div class="text-sm text-red-300">
+        <strong>models.yaml could not be read.</strong>
+        <span x-text="registry.file_error"></span>
+        Fix it on disk — saving from here is disabled so the file is not overwritten.
+      </div>
+    </div>
+
+    <!-- Mounted read-only (or otherwise not writable): say so up front rather
+         than letting the operator discover it when Save fails. -->
+    <div x-show="registry.writable === false && !hasBrokenRegistryFile()"
+         class="flex items-start gap-2.5 bg-slate-500/10 border border-slate-500/25 rounded-lg p-3.5">
+      <svg class="w-4 h-4 text-slate-400 shrink-0 mt-0.5"><use href="#ic-warn"/></svg>
+      <div class="text-sm text-slate-300">
+        <strong>Read-only.</strong>
+        models.yaml is not writable by the engine, so this view is a viewer —
+        edit the file where it is mounted, or mount it writable to edit here.
+      </div>
+    </div>
+
+    <!-- What is actually serving right now -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <span class="text-[9px] font-mono tracking-[0.22em] text-cyan-700">// SERVING NOW</span>
+        <span class="text-[10px] font-mono text-cyan-900"
+              x-text="hasRegistryFile() ? 'models.yaml' : 'MODEL_NAME (no models.yaml)'"></span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead class="border-b border-slate-700/60">
+            <tr>
+              <th class="th">Id</th>
+              <th class="th">Model</th>
+              <th class="th">Backend</th>
+              <th class="th text-right">Context</th>
+              <th class="th">Pool</th>
+              <th class="th">Role</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-700/40">
+            <template x-for="m in registry.models" :key="'live-' + m.id">
+              <tr>
+                <td class="td font-mono text-slate-100">
+                  <span x-text="m.id"></span>
+                  <span x-show="m.id === registry.default"
+                        class="ml-2 text-[10px] font-mono px-1.5 py-0.5 rounded bg-brand/15 text-brand">default</span>
+                </td>
+                <td class="td font-mono text-xs text-slate-300" x-text="m.model"></td>
+                <td class="td font-mono text-[11px] text-slate-500 max-w-xs truncate" x-text="m.api_url"></td>
+                <td class="td text-right text-slate-400" x-text="(m.context_window || 0).toLocaleString()"></td>
+                <td class="td">
+                  <span class="text-[10px] font-mono px-1.5 py-0.5 rounded"
+                        :class="m.pool === 'none' ? 'bg-slate-700/40 text-slate-400' : 'bg-cyan-500/10 text-cyan-400'"
+                        x-text="m.pool"></span>
+                </td>
+                <td class="td text-[10px] font-mono text-slate-500">
+                  <template x-for="role in Object.keys(registry.roles || {})" :key="'r-' + m.id + role">
+                    <span x-show="registry.roles[role] === m.id" class="mr-1.5" x-text="role"></span>
+                  </template>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <p x-show="!hasRegistryFile()" class="text-xs text-slate-600 mt-3">
+        No models.yaml yet — this deployment serves the single model its
+        <code class="text-slate-500">AI_API_URL</code> / <code class="text-slate-500">MODEL_NAME</code>
+        env vars describe. The editor below is seeded with it, so adding a second model keeps the first.
+      </p>
+    </div>
+
+    <!-- Editor -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <span class="text-[9px] font-mono tracking-[0.22em] text-cyan-700">// models.yaml</span>
+        <div class="flex items-center gap-2">
+          <button @click="addDraftModel()" class="btn-sm bg-slate-700 hover:bg-slate-600 text-slate-300" :disabled="!canSave()">
+            <svg class="w-3.5 h-3.5"><use href="#ic-plus"/></svg>
+            Add model
+          </button>
+          <button x-show="hasRegistryFile() || hasBrokenRegistryFile()" @click="openRemoveRegistryModal()"
+                  class="btn-sm bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20">
+            <svg class="w-3.5 h-3.5"><use href="#ic-trash"/></svg>
+            Remove file
+          </button>
+        </div>
+      </div>
+
+      <div class="space-y-3">
+        <template x-for="(m, i) in draft.models" :key="'draft-' + i">
+          <div class="bg-black/30 border border-cyan-500/8 rounded p-3.5">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Id <span class="text-slate-600">(required)</span></label>
+                <input x-model="m.id" type="text" placeholder="smart" class="input font-mono text-sm" />
+              </div>
+              <div>
+                <label class="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Model <span class="text-slate-600">(required — the name the backend serves)</span></label>
+                <input x-model="m.model" type="text" placeholder="qwen3:32b" class="input font-mono text-sm" />
+              </div>
+              <div>
+                <label class="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">API URL <span class="text-slate-600">(blank = AI_API_URL)</span></label>
+                <input x-model="m.api_url" type="text" placeholder="https://api.openai.com/v1" class="input font-mono text-sm" />
+              </div>
+              <div>
+                <label class="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">API key <span class="text-slate-600">(blank = AI_API_KEY; ${VAR} supported)</span></label>
+                <input x-model="m.api_key" type="text" placeholder="${OPENAI_API_KEY}" class="input font-mono text-sm" />
+              </div>
+              <div>
+                <label class="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Context window <span class="text-slate-600">(blank = CONTEXT_WINDOW)</span></label>
+                <input x-model="m.context_window" type="number" min="1" placeholder="32768" class="input font-mono text-sm" />
+              </div>
+              <div>
+                <label class="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Pool <span class="text-slate-600">(same hardware = same pool; "none" = remote)</span></label>
+                <input x-model="m.pool" type="text" placeholder="default" class="input font-mono text-sm" />
+              </div>
+            </div>
+            <div class="flex justify-end mt-2.5">
+              <button @click="removeDraftModel(i)" class="btn-sm bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20">
+                <svg class="w-3.5 h-3.5"><use href="#ic-trash"/></svg>
+                Remove
+              </button>
+            </div>
+          </div>
+        </template>
+
+        <p x-show="draft.models.length === 0" class="text-sm text-slate-500 py-4 text-center">
+          No models declared. Add one, or leave the file removed to serve the single env-var model.
+        </p>
+      </div>
+
+      <!-- Default + roles -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-5 pt-5 border-t border-slate-700/40">
+        <div>
+          <label class="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Default</label>
+          <select x-model="draft.default" class="input font-mono text-sm">
+            <option value="">first entry</option>
+            <template x-for="m in draft.models" :key="'def-' + m.id"><option :value="m.id" x-text="m.id"></option></template>
+          </select>
+          <p class="text-[10px] text-slate-600 mt-1">What a request naming no model gets.</p>
+        </div>
+        <div>
+          <label class="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Utility role</label>
+          <select x-model="draft.roles.utility" class="input font-mono text-sm">
+            <option value="">registry default</option>
+            <template x-for="m in draft.models" :key="'util-' + m.id"><option :value="m.id" x-text="m.id"></option></template>
+          </select>
+          <p class="text-[10px] text-slate-600 mt-1">Query reformulation, compaction.</p>
+        </div>
+        <div>
+          <label class="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Background role</label>
+          <select x-model="draft.roles.background" class="input font-mono text-sm">
+            <option value="">registry default</option>
+            <template x-for="m in draft.models" :key="'bg-' + m.id"><option :value="m.id" x-text="m.id"></option></template>
+          </select>
+          <p class="text-[10px] text-slate-600 mt-1">Hypothetical-question generation.</p>
+        </div>
+      </div>
+
+      <p x-show="draftError" class="text-sm text-red-400 mt-4" x-text="draftError"></p>
+
+      <div class="flex items-center justify-end gap-3 mt-5">
+        <button @click="_seedDraft()" class="btn-ghost">Discard changes</button>
+        <button @click="saveModels()" class="btn-primary" :disabled="modalLoading || !canSave()">
+          <span x-show="modalLoading" class="spinner"></span>
+          <svg x-show="!modalLoading" class="w-4 h-4"><use href="#ic-check"/></svg>
+          Save models.yaml
+        </button>
+      </div>
+      <p class="text-[10px] text-slate-600 mt-2 text-right">
+        Validated on save — a registry the engine would refuse to boot with is rejected, and nothing is written.
+        Fields this form does not show (such as per-model <code>params</code>) are preserved as written.
+      </p>
+    </div>
+
+  </div>
+</div>

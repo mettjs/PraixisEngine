@@ -22,6 +22,7 @@
   "canonical_source": "PraixisEngine/tests/marker_vectors.json",
   "marker_keys": [
     "SESSION_ID",
+    "MODEL",
     "SEARCH_QUERY",
     "SOURCES",
     "FILE",
@@ -166,7 +167,7 @@
       "content": "Hello world"
     },
     {
-      "name": "rag: all three leading markers",
+      "name": "rag: session, search query and sources markers",
       "chunks": [
         "[SESSION_ID:sess-2]\n[SEARCH_QUERY:vacation days]\n[SOURCES:handbook.txt,policy.pdf]\n",
         "You get two days."
@@ -180,6 +181,63 @@
         "policy.pdf"
       ],
       "content": "You get two days."
+    },
+    {
+      "name": "chat: model marker follows the session id",
+      "chunks": [
+        "[SESSION_ID:sess-4]\n[MODEL:fast]\n",
+        "Hello ",
+        "world"
+      ],
+      "meta": {
+        "SESSION_ID": "sess-4",
+        "MODEL": "fast"
+      },
+      "sources": null,
+      "content": "Hello world"
+    },
+    {
+      "name": "rag: model marker sits between session id and search query",
+      "chunks": [
+        "[SESSION_ID:sess-5]\n[MODEL:smart]\n[SEARCH_QUERY:vacation days]\n[SOURCES:handbook.txt]\n",
+        "You get two days."
+      ],
+      "meta": {
+        "SESSION_ID": "sess-5",
+        "MODEL": "smart",
+        "SEARCH_QUERY": "vacation days"
+      },
+      "sources": [
+        "handbook.txt"
+      ],
+      "content": "You get two days."
+    },
+    {
+      "name": "summary: model marker follows the file marker",
+      "chunks": [
+        "[FILE:report.pdf]\n[MODEL:fast]\n",
+        "Three sentences."
+      ],
+      "meta": {
+        "FILE": "report.pdf",
+        "MODEL": "fast"
+      },
+      "sources": null,
+      "content": "Three sentences."
+    },
+    {
+      "name": "model marker split across a chunk boundary",
+      "chunks": [
+        "[SESSION_ID:sess-6]\n[MOD",
+        "EL:smart]\n",
+        "Answer."
+      ],
+      "meta": {
+        "SESSION_ID": "sess-6",
+        "MODEL": "smart"
+      },
+      "sources": null,
+      "content": "Answer."
     },
     {
       "name": "marker split across a chunk boundary",

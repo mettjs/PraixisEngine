@@ -20,11 +20,36 @@ function _adminKeys() {
       }
     },
 
-    openGenerateKeyModal() {
-      this.newAppName      = '';
-      this.newAppNameError = '';
-      this.modalLoading    = false;
-      this.modal           = 'generateKey';
+    async loadRegistry() {
+      try {
+        const r = await this.req('GET', '/api/system/models');
+        if (r.ok) this.registry = await r.json();
+      } catch { /* the scope picker just stays empty */ }
+    },
+
+    async openGenerateKeyModal() {
+      this.newAppName         = '';
+      this.newAppNameError    = '';
+      this.newKeyModels       = [];
+      this.newKeyDefaultModel = '';
+      this.modalLoading       = false;
+      this.modal              = 'generateKey';
+      if (!this.registry.models.length) await this.loadRegistry();
+    },
+
+    toggleNewKeyModel(id) {
+      const i = this.newKeyModels.indexOf(id);
+      if (i === -1) this.newKeyModels.push(id);
+      else          this.newKeyModels.splice(i, 1);
+      // A default outside the scope would be rejected server-side anyway.
+      if (this.newKeyModels.length && !this.newKeyModels.includes(this.newKeyDefaultModel)) {
+        this.newKeyDefaultModel = '';
+      }
+    },
+
+    keyScopeLabel(key) {
+      if (!key.models || !key.models.length) return 'All models';
+      return key.models.join(', ');
     },
 
     async generateKey() {
@@ -35,7 +60,11 @@ function _adminKeys() {
       }
       this.modalLoading = true;
       try {
-        const r = await this.req('POST', '/api/system/keys/generate', { app_name: this.newAppName });
+        const r = await this.req('POST', '/api/system/keys/generate', {
+          app_name:      this.newAppName,
+          models:        this.newKeyModels,
+          default_model: this.newKeyDefaultModel,
+        });
         if (r.ok) {
           this.modalData = await r.json();
           this.modal     = 'newKeyResult';

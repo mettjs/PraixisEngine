@@ -9,14 +9,17 @@ function _adminHelpers() {
     },
 
     statusColor(status) {
-      if (status === 'online')  return 'text-green-400';
-      if (status === 'offline') return 'text-red-400';
+      if (status === 'online')   return 'text-green-400';
+      if (status === 'degraded') return 'text-amber-400';
+      if (status === 'offline')  return 'text-red-400';
       return 'text-slate-500';
     },
 
     statusDotColor(status) {
-      if (status === 'online')  return 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.6)]';
-      if (status === 'offline') return 'bg-red-400';
+      if (status === 'online')   return 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.6)]';
+      // Some LLM backends up, others down — not an outage, not healthy either.
+      if (status === 'degraded') return 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)]';
+      if (status === 'offline')  return 'bg-red-400';
       return 'bg-slate-500 animate-pulse';
     },
 

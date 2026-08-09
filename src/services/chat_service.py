@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from src.models.registry import ModelSpec
 from src.utils.file_parser import chunk_text
 from src.utils.system.logger import logger
 from src.services.llm_runner import stream_llm, map_calls_iter
@@ -8,11 +9,13 @@ from src.services.session_stream import open_user_turn, stream_assistant_turn
 async def generate_chat_stream(
     prompt: str,
     app_name: str,
+    spec: ModelSpec,
     system_prompt: str | None = None,
     session_id: str | None = None,
     response_format: str = "text",
+    model_was_explicit: bool = False,
 ) -> AsyncGenerator[str, None]:
-    """Streams the chat response token-by-token.
+    """Streams the chat response token-by-token, from the model in ``spec``.
 
     The GPU slot is acquired by the controller and released by the
     ``SlotReleasingStreamingResponse`` wrapping this generator.
@@ -20,8 +23,10 @@ async def generate_chat_stream(
     active_session_id, history = await open_user_turn(
         app_name=app_name,
         user_message=prompt,
+        spec=spec,
         session_id=session_id,
         system_prompt=system_prompt,
+        model_was_explicit=model_was_explicit,
     )
 
     extra: dict = {}
@@ -29,11 +34,13 @@ async def generate_chat_stream(
         extra["response_format"] = {"type": "json_object"}
 
     yield f"[SESSION_ID:{active_session_id}]\n"
+    yield f"[MODEL:{spec.id}]\n"
     async for token in stream_assistant_turn(
         messages=history,
         app_name=app_name,
         session_id=active_session_id,
         history=history,
+        spec=spec,
         extra=extra,
     ):
         yield token
@@ -44,6 +51,7 @@ async def generate_file_summary(
     task: str,
     tone: str,
     app_name: str,
+    spec: ModelSpec,
     response_format: str = "text",
 ) -> AsyncGenerator[str, None]:
     """Processes a document based on user instructions, streaming progress events
@@ -65,7 +73,7 @@ async def generate_file_summary(
             {"role": "system", "content": f"{system_setup}\n\nTask: {task}"},
             {"role": "user", "content": text_chunks[0]},
         ]
-        async for token in stream_llm(messages, app_name, extra=extra):
+        async for token in stream_llm(messages, app_name, spec, extra=extra):
             yield token
         return
 
@@ -86,6 +94,7 @@ async def generate_file_summary(
             for chunk in text_chunks
         ],
         app_name,
+        spec,
     ):
         if isinstance(item, list):
             mini_results = item
@@ -106,5 +115,5 @@ async def generate_file_summary(
         {"role": "system", "content": reduce_prompt},
         {"role": "user", "content": combined_text},
     ]
-    async for token in stream_llm(reduce_messages, app_name, extra=extra):
+    async for token in stream_llm(reduce_messages, app_name, spec, extra=extra):
         yield token

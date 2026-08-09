@@ -1,0 +1,53 @@
+# models.yaml — the LLM registry. OPTIONAL.
+#
+# Delete or omit this file and the engine stays exactly as it was: AI_API_URL,
+# AI_API_KEY, MODEL_NAME and CONTEXT_WINDOW synthesize a single model with the
+# id `default`, and every request goes to it.
+#
+# Copy to `models.yaml` (gitignored) to declare more than one. Only LLMs live
+# here — EMBEDDING_MODEL stays global, since changing it invalidates the
+# vectors already stored.
+#
+# Every field except `id` and `model` has a default, so the common case (one
+# proxy serving several models) is two lines per entry.
+
+# Which model answers a request that names none. Optional; defaults to the
+# first entry below.
+default: smart
+
+# Internal chores resolve by role, not by the caller's model — routing a user's
+# chat to an expensive model should not bill query reformulation and background
+# question generation to it too. Both default to `default`.
+roles:
+  utility: fast        # query reformulation, conversation compaction
+  background: fast     # hypothetical-question generation
+
+# Concurrency budget per *physical backend*. Models that share hardware must
+# share a pool id — that is the whole point of naming them. Any pool omitted
+# here is sized by GPU_CONCURRENCY, including `default` (the pre-existing
+# gpu:slots bucket) — naming `default` below overrides that env var for it.
+# `none` is reserved: it means the model takes no local slot at all.
+pools:
+  big: 1
+  small: 4
+
+models:
+  # Minimal entry: served by AI_API_URL with the global CONTEXT_WINDOW.
+  - id: fast
+    model: gemma4:e4b
+
+  - id: smart
+    model: qwen3:32b
+    context_window: 32768
+    pool: big
+
+  # A remote model: its own endpoint, its own key, and no local GPU slot.
+  - id: cloud
+    model: gpt-4o
+    api_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}   # ${VAR} expansion — never commit a real key
+    pool: none
+    params:                      # splatted into every request to this model.
+      temperature: 0.2           # `model`, `messages`, `stream` and
+                                 # `stream_options` are set per request by the
+                                 # engine and are rejected here.

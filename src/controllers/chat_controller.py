@@ -9,17 +9,28 @@ from src.utils.store.usage import get_session_usage
 from src.utils.system.logger import logger
 from src.utils.system.streaming import SlotReleasingStreamingResponse, drain_to_json, guard_stream
 from src.utils.concurrency import GPUBusyError, acquire_gpu_slot
+from src.dependencies.models import allowed_models, resolve_model_or_400, resolve_request_model
+from src.models.registry import list_models, resolve_role
 
 
-async def handle_chat(request: ChatRequest, app_name: str) -> StreamingResponse | dict:
+async def handle_chat(
+    request: ChatRequest, app_name: str, caller_entry: dict | None = None
+) -> StreamingResponse | dict:
+    # Resolved before the slot is taken: an unknown model must be a clean 400,
+    # not a 400 that also burned a GPU permit.
+    spec = await resolve_request_model(
+        request.model, app_name=app_name, caller_entry=caller_entry, session_id=request.session_id
+    )
     try:
-        slot = await acquire_gpu_slot()
+        slot = await acquire_gpu_slot(spec.pool)
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     reply = generate_chat_stream(
         app_name=app_name,
         prompt=request.prompt,
+        spec=spec,
+        model_was_explicit=request.model is not None,
         system_prompt=request.system_prompt,
         session_id=request.session_id,
         response_format=request.response_format,
@@ -48,9 +59,12 @@ async def handle_file_summary(
     task: str,
     tone: str,
     app_name: str,
+    model: str | None = None,
+    caller_entry: dict | None = None,
     stream: bool = True,
     response_format: str = "text",
 ) -> StreamingResponse | dict:
+    spec = resolve_model_or_400(model, caller_entry)
     if not file.filename:
         logger.warning("Received file summary request without a file.")
         raise HTTPException(status_code=400, detail="No file uploaded.")
@@ -74,11 +88,13 @@ async def handle_file_summary(
     # under concurrency).
     async def _summary_with_header():
         yield f"[FILE:{filename}]\n"
+        yield f"[MODEL:{spec.id}]\n"
         async for token in generate_file_summary(
             document_text=document_text,
             task=task,
             tone=tone,
             app_name=app_name,
+            spec=spec,
             response_format=response_format,
         ):
             yield token
@@ -95,6 +111,23 @@ async def handle_file_summary(
 
     logger.info(f"Streaming file summary for app: {app_name}, file: {filename}")
     return StreamingResponse(guard_stream(_summary_with_header()), media_type="text/event-stream")
+
+
+async def handle_list_models(app_name: str, caller_entry: dict | None = None) -> dict:
+    """The models this caller may address, and which one it gets by default.
+
+    Scoped to the key's allowlist: models it may not use are not listed, which
+    is the same stance the 400 on an unusable id takes. ``context_window`` is
+    part of the contract — a client switching a long session to a smaller model
+    needs to know what it is switching to.
+    """
+    allowed = allowed_models(caller_entry)
+    visible = [spec for spec in list_models() if allowed is None or spec.id in allowed]
+    return {
+        "models": [{"id": spec.id, "context_window": spec.context_window} for spec in visible],
+        # What a request naming no model actually gets, per key.
+        "default": resolve_model_or_400(None, caller_entry).id,
+    }
 
 
 async def handle_fetch_history(session_id: str, app_name: str) -> dict:
@@ -165,15 +198,20 @@ async def handle_compact_session(session_id: str, app_name: str) -> dict:
             detail="Not enough history to compact — the conversation already fits in the verbatim window.",
         )
 
+    # The summary is written by the utility model, so the slot must come from
+    # that model's pool — not from whichever pool the session chats with.
+    utility_pool = resolve_role("utility").pool
     try:
-        slot = await acquire_gpu_slot()
+        slot = await acquire_gpu_slot(utility_pool)
     except GPUBusyError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     # compact_history uses the raw client, so this endpoint owns the slot for
     # the duration of the summarization call.
     try:
-        compacted = await compact_history(history, app_name=app_name, session_id=session_id)
+        compacted = await compact_history(
+            history, app_name=app_name, session_id=session_id, held_pool=utility_pool,
+        )
     except Exception as e:
         logger.error(f"Compaction failed for session {session_id} (app: {app_name}): {e}")
         raise HTTPException(status_code=502, detail="Compaction failed: could not summarize the conversation.")

@@ -38,6 +38,11 @@ AI_API_URL: str = os.getenv("AI_API_URL", "http://localhost:8081")
 AI_API_KEY: str = os.getenv("AI_API_KEY", "")
 MODEL_NAME: str = os.getenv("MODEL_NAME", "gemma-api-test")
 
+# Optional multi-model registry. When this file is absent the three vars above
+# synthesize a single 'default' model, which is exactly the single-model
+# behavior every deployment had before the registry existed. See models.yaml.example.
+MODELS_FILE: str = os.getenv("MODELS_FILE", os.path.join(_ROOT, "models.yaml"))
+
 # --- Redis & sessions ---
 REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL: int = int(os.getenv("SESSION_TTL", "86400"))          # seconds

@@ -9,12 +9,12 @@ from src.utils.system.logger import logger
 
 
 # Control markers are emitted by the streaming generators as standalone lines
-# like ``[SESSION_ID:abc]\n`` or ``[SOURCES:a,b]\n``, distinct from the LLM
-# content tokens. A full match against this pattern is what separates a marker
+# like ``[SESSION_ID:abc]\n``, ``[MODEL:fast]\n`` or ``[SOURCES:a,b]\n``,
+# distinct from the LLM content tokens. A full match against this pattern is what separates a marker
 # from a content token when draining a stream into a buffered JSON body.
 # The keys are whitelisted: an LLM token that happens to look like
 # ``[NOTE:x]\n`` must stay content, not be swallowed as a marker.
-MARKER_KEYS = ("SESSION_ID", "SEARCH_QUERY", "SOURCES", "FILE", "PROGRESS", "ERROR")
+MARKER_KEYS = ("SESSION_ID", "MODEL", "SEARCH_QUERY", "SOURCES", "FILE", "PROGRESS", "ERROR")
 _MARKER_RE = re.compile(r"\[(" + "|".join(MARKER_KEYS) + r"):(.*)\]\n?", re.DOTALL)
 
 # Escaping for items inside the comma-separated ``[SOURCES:...]`` value.

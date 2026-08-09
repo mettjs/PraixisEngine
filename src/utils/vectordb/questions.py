@@ -23,6 +23,7 @@ from src.config import (
     HQ_PER_CHUNK as _PER_CHUNK,
     HQ_GPU_CONCURRENCY as _HQ_SLOTS,
 )
+from src.models.registry import resolve_role
 from src.services.llm_runner import call_llm
 from src.utils.concurrency import hq_gpu_slot
 from src.utils.store.client import redis_client
@@ -90,6 +91,9 @@ async def _questions_for_chunk(content: str, app_name: str, per_chunk: int) -> l
                 {"role": "user", "content": prompt},
             ],
             app_name,
+            # Background chore: resolved by role, so it stays on the cheap
+            # model regardless of what the uploading app chats with.
+            resolve_role("background"),
             gpu_ctx=hq_gpu_slot,
         )
     except asyncio.CancelledError:

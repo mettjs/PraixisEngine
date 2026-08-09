@@ -3,6 +3,7 @@ lifecycle (generate → rotate → revoke), usage & daily buckets, session
 wiping, audit log, and the vector-DB admin surface."""
 import datetime
 import uuid
+from types import SimpleNamespace
 
 from conftest import ADMIN_AUTH, VECTOR_BACKEND
 from src.utils.store.api_keys import hash_api_key
@@ -34,6 +35,283 @@ def test_health_reports_all_backends_online(client):
     assert body == {"api": "online", "redis": "online", "vectordb": "online", "llm": "online"}
     assert client.get("/api/system/health/redis", auth=ADMIN_AUTH).json() == {"status": "online"}
     assert client.get("/api/system/health/vectordb", auth=ADMIN_AUTH).json() == {"status": "online"}
+
+
+def test_llm_health_pings_each_backend_once_not_each_model(client, pooled_models):
+    """Three models, two endpoints: a proxy serving several models is one ping."""
+    body = client.get("/api/system/health/llm", auth=ADMIN_AUTH).json()
+    assert body["status"] == "online"
+    backends = {entry["api_url"]: entry for entry in body["backends"]}
+    assert len(backends) == 2
+    assert backends["http://fake-llm.invalid"]["models"] == ["fast", "smart"]
+    assert backends["http://fake-cloud.invalid"]["models"] == ["cloud"]
+
+
+def test_llm_health_is_degraded_when_one_backend_is_down(client, pooled_models, monkeypatch):
+    """One backend of several failing is not the same outage as having no LLM."""
+    import src.controllers.admin_controller as admin_controller
+    from conftest import FAKE_LLM
+
+    class _Dead:
+        """A backend whose ping never answers."""
+
+        def __init__(self):
+            self.models = SimpleNamespace(list=self._fail)
+
+        def with_options(self, **_kwargs):
+            return self
+
+        async def _fail(self):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(
+        admin_controller,
+        "get_async_ai_client",
+        lambda spec: _Dead() if spec.api_url == "http://fake-cloud.invalid" else FAKE_LLM,
+    )
+    body = client.get("/api/system/health/llm", auth=ADMIN_AUTH).json()
+    assert body["status"] == "degraded"
+    statuses = {entry["api_url"]: entry["status"] for entry in body["backends"]}
+    assert statuses == {"http://fake-llm.invalid": "online", "http://fake-cloud.invalid": "offline"}
+    # The rollup the dashboard reads reflects it too.
+    assert client.get("/api/system/health", auth=ADMIN_AUTH).json()["llm"] == "degraded"
+
+
+def test_model_registry_endpoint_describes_the_deployment(client, pooled_models):
+    """The operator view: unscoped, with the backend and pool of each model —
+    what the panel needs to render scoping and capacity."""
+    body = client.get("/api/system/models", auth=ADMIN_AUTH).json()
+    assert body["default"] == "fast"
+    assert body["roles"] == {"utility": "fast", "background": "fast"}
+    by_id = {m["id"]: m for m in body["models"]}
+    assert by_id["smart"]["model"] == "qwen3:32b"
+    assert by_id["smart"]["pool"] == "big"
+    assert by_id["cloud"]["api_url"] == "http://fake-cloud.invalid"
+    assert by_id["cloud"]["pool"] == "none"
+
+
+def test_llm_health_pings_each_credential_on_a_shared_endpoint(client, monkeypatch):
+    """Two models on one URL with different keys are two backends.
+
+    Clients are cached on (api_url, api_key), so deduping the health check by
+    URL alone would exercise one credential and report a revoked key as online.
+    """
+    import src.controllers.admin_controller as admin_controller
+    import src.models.registry as registry_module
+    from conftest import FAKE_LLM
+
+    monkeypatch.setenv("KEY_A", "sk-a")
+    monkeypatch.setenv("KEY_B", "sk-b")
+    monkeypatch.setattr(registry_module, "_REGISTRY", registry_module.build_registry({
+        "models": [
+            {"id": "a", "model": "m", "api_url": "https://proxy.invalid/v1", "api_key": "${KEY_A}"},
+            {"id": "b", "model": "n", "api_url": "https://proxy.invalid/v1", "api_key": "${KEY_B}"},
+        ],
+    }))
+
+    class _Dead:
+        def __init__(self):
+            self.models = SimpleNamespace(list=self._fail)
+
+        def with_options(self, **_kwargs):
+            return self
+
+        async def _fail(self):
+            raise RuntimeError("401 unauthorized")
+
+    # Only the revoked credential fails.
+    monkeypatch.setattr(
+        admin_controller,
+        "get_async_ai_client",
+        lambda spec: _Dead() if spec.api_key == "sk-a" else FAKE_LLM,
+    )
+    body = client.get("/api/system/health/llm", auth=ADMIN_AUTH).json()
+    assert len(body["backends"]) == 2, body
+    assert body["status"] == "degraded", body
+    by_models = {entry["models"][0]: entry["status"] for entry in body["backends"]}
+    assert by_models == {"a": "offline", "b": "online"}, body
+
+
+def test_registry_can_be_written_and_read_back(client, tmp_path, monkeypatch):
+    """The panel edits the file, not the running registry."""
+    import src.models.registry as registry_module
+
+    path = str(tmp_path / "models.yaml")
+    monkeypatch.setattr(registry_module, "_MODELS_FILE", path)
+
+    def _read(p):
+        import os
+
+        import yaml
+        if not os.path.isfile(p):
+            return None
+        with open(p) as handle:
+            return yaml.safe_load(handle)
+
+    body = {"default": "fast", "models": [{"id": "fast", "model": "gemma4:e4b"}]}
+    response = client.put("/api/system/models", json=body, auth=ADMIN_AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()["restart_required"] is True  # the file now differs from the live registry
+
+    written = _read(path)
+    assert written == body, written
+    # Only what was typed is written — no env defaults baked in.
+    assert "api_url" not in written["models"][0]
+
+
+def test_registry_write_rejects_a_document_that_would_not_boot(client, tmp_path, monkeypatch):
+    """Validation runs on the whole document before anything is written, so a
+    save can never leave a registry the engine would refuse to start with."""
+    import src.models.registry as registry_module
+
+    path = str(tmp_path / "models.yaml")
+    monkeypatch.setattr(registry_module, "_MODELS_FILE", path)
+
+    good = {"models": [{"id": "fast", "model": "m"}]}
+    assert client.put("/api/system/models", json=good, auth=ADMIN_AUTH).status_code == 200
+
+    bad = {"default": "nope", "models": [{"id": "fast", "model": "m"}]}
+    response = client.put("/api/system/models", json=bad, auth=ADMIN_AUTH)
+    assert response.status_code == 400
+    assert "default" in response.json()["detail"]
+
+    import yaml
+    with open(path) as handle:
+        assert yaml.safe_load(handle) == good, "a rejected save must leave the file untouched"
+
+
+def test_registry_write_falls_back_when_the_target_is_bind_mounted(client, tmp_path, monkeypatch):
+    """Docker mounts models.yaml as its own mountpoint, so renaming over it is
+    EBUSY regardless of ownership. The editor must still be able to save on the
+    deployment shape the docs recommend."""
+    import os
+
+    import src.models.registry as registry_module
+
+    path = str(tmp_path / "models.yaml")
+    monkeypatch.setattr(registry_module, "_MODELS_FILE", path)
+    assert client.put("/api/system/models", json={"models": [{"id": "a", "model": "m"}]},
+                      auth=ADMIN_AUTH).status_code == 200
+
+    def _ebusy(*_args, **_kwargs):
+        raise OSError(16, "Device or resource busy")
+
+    monkeypatch.setattr(os, "replace", _ebusy)
+    response = client.put("/api/system/models", json={"models": [{"id": "b", "model": "n"}]},
+                          auth=ADMIN_AUTH)
+    assert response.status_code == 200, response.text
+
+    import yaml
+    with open(path) as handle:
+        assert yaml.safe_load(handle) == {"models": [{"id": "b", "model": "n"}]}
+    # And the fallback leaves no temp file behind.
+    assert not [f for f in os.listdir(tmp_path) if f.startswith(".models.")]
+
+
+def test_registry_can_be_removed(client, tmp_path, monkeypatch):
+    """DELETE removes the file, returning the deployment to its env vars."""
+    import os
+
+    import src.models.registry as registry_module
+
+    path = str(tmp_path / "models.yaml")
+    monkeypatch.setattr(registry_module, "_MODELS_FILE", path)
+    assert client.put("/api/system/models", json={"models": [{"id": "a", "model": "m"}]},
+                      auth=ADMIN_AUTH).status_code == 200
+    assert os.path.isfile(path)
+
+    assert client.delete("/api/system/models", auth=ADMIN_AUTH).status_code == 200
+    assert not os.path.isfile(path)
+
+
+def test_registry_put_requires_a_body(client, tmp_path, monkeypatch):
+    """Deleting the registry must never be reachable by forgetting a payload."""
+    import os
+
+    import src.models.registry as registry_module
+
+    path = str(tmp_path / "models.yaml")
+    monkeypatch.setattr(registry_module, "_MODELS_FILE", path)
+    assert client.put("/api/system/models", json={"models": [{"id": "a", "model": "m"}]},
+                      auth=ADMIN_AUTH).status_code == 200
+
+    response = client.put("/api/system/models", auth=ADMIN_AUTH)
+    assert response.status_code == 422, response.text
+    assert os.path.isfile(path), "an empty PUT must not delete the registry"
+
+
+def test_registry_endpoint_reports_the_file_and_restart_state(client, tmp_path, monkeypatch):
+    import src.models.registry as registry_module
+
+    path = str(tmp_path / "models.yaml")
+    monkeypatch.setattr(registry_module, "_MODELS_FILE", path)
+
+    # No file: the panel is told so, and nothing needs restarting.
+    body = client.get("/api/system/models", auth=ADMIN_AUTH).json()
+    assert body["file"] is None
+    assert body["restart_required"] is False
+    assert [m["id"] for m in body["models"]] == ["default"]
+
+    client.put("/api/system/models", json={"models": [{"id": "fast", "model": "m"}]}, auth=ADMIN_AUTH)
+    body = client.get("/api/system/models", auth=ADMIN_AUTH).json()
+    assert body["file"] == {"models": [{"id": "fast", "model": "m"}]}
+    # Still serving the old registry — that gap is the whole point of the flag.
+    assert body["restart_required"] is True
+    assert [m["id"] for m in body["models"]] == ["default"]
+
+
+def test_registry_endpoint_reports_an_unreadable_file(client, tmp_path, monkeypatch):
+    """A corrupt models.yaml must not be reported as an absent one — the panel
+    would seed from env and overwrite something recoverable."""
+    import src.models.registry as registry_module
+
+    path = tmp_path / "models.yaml"
+    path.write_text("models: [ unclosed\n")
+    monkeypatch.setattr(registry_module, "_MODELS_FILE", str(path))
+
+    body = client.get("/api/system/models", auth=ADMIN_AUTH).json()
+    assert body["file"] is None
+    assert body["file_error"] and "models.yaml" in body["file_error"]
+    assert body["restart_required"] is True
+
+
+def test_registry_endpoint_reports_writability(client, tmp_path, monkeypatch):
+    """The panel says 'read-only' up front instead of discovering it on a 500."""
+
+    import src.models.registry as registry_module
+
+    path = tmp_path / "models.yaml"
+    path.write_text("models:\n  - id: a\n    model: m\n")
+    monkeypatch.setattr(registry_module, "_MODELS_FILE", str(path))
+    assert client.get("/api/system/models", auth=ADMIN_AUTH).json()["writable"] is True
+
+    path.chmod(0o444)
+    try:
+        assert client.get("/api/system/models", auth=ADMIN_AUTH).json()["writable"] is False
+    finally:
+        path.chmod(0o644)
+
+
+def test_wiping_sessions_clears_bindings_with_no_history_left(client, headers, redis_state, fake_llm):
+    """A history can expire while its model binding still has TTL left, so the
+    wipe must not skip bindings just because no chat keys remain."""
+    redis_state.set("session:orphanapp:deadbeef:model", "fast")
+    assert redis_state.keys("chat:orphanapp:*") == []
+
+    response = client.delete("/api/system/sessions/orphanapp", auth=ADMIN_AUTH)
+    assert response.status_code == 200
+    assert response.json()["sessions_deleted"] == 0
+    assert redis_state.keys("session:orphanapp:*:model") == []
+
+
+def test_gpu_reset_reports_every_pool(client, pooled_models):
+    body = client.post("/api/system/gpu/reset", auth=ADMIN_AUTH).json()
+    assert body["status"] == "success"
+    assert body["slots_total"] == 2          # unchanged top-level contract
+    assert body["pools"] == {
+        "default": {"slots_total": 2, "hq_slots_total": 1},
+        "big": {"slots_total": 1, "hq_slots_total": 0},
+    }
 
 
 def test_stats_shape(client):

@@ -2,7 +2,7 @@ import asyncio
 from fastapi import HTTPException
 from src.utils.store.client import redis_client
 from src.utils.store.sessions import delete_all_app_sessions
-from src.utils.store.usage import get_usage, get_all_app_names, get_daily_usage
+from src.utils.store.usage import get_usage, get_all_app_names, get_daily_usage, get_usage_by_model
 from src.utils.store.api_keys import (
     store_api_key,
     remove_api_key_by_hash,
@@ -11,13 +11,36 @@ from src.utils.store.api_keys import (
     new_api_key,
 )
 from src.utils.vectordb import get_vector_store
+from src.models.registry import (
+    ROLES,
+    ModelConfigError,
+    ModelSpec,
+    UnknownModelError,
+    default_model,
+    list_models,
+    registry_file_state,
+    resolve_model,
+    resolve_role,
+    write_registry_file,
+)
 from src.utils.ai_client import get_async_ai_client
 from src.utils.concurrency import get_gpu_status, reset_gpu_counter
 from src.utils.store.audit import log_event, get_audit_log
 from src.utils.system.logger import logger
 
-# Used only for the health-check ping (no LLM calls, no token tracking)
-_llm_client = get_async_ai_client()
+def _llm_backends() -> list[tuple[ModelSpec, list[str]]]:
+    """(one spec to ping, the model ids it stands for) per distinct backend.
+
+    Deduped by endpoint *and credential*, matching how ai_client caches its
+    clients: a dozen models behind one LiteLLM proxy on one key is a single
+    ping, but two models sharing a URL with different ``api_key``s are two —
+    pinging only one of them would report a revoked key as healthy.
+    """
+    backends: dict[tuple[str, str], tuple[ModelSpec, list[str]]] = {}
+    for spec in list_models():
+        _, ids = backends.setdefault((spec.api_url, spec.api_key), (spec, []))
+        ids.append(spec.id)
+    return list(backends.values())
 
 
 async def get_redis_health() -> dict:
@@ -39,12 +62,38 @@ async def get_vectordb_health() -> dict:
 
 
 async def get_llm_health() -> dict:
-    try:
-        await _llm_client.with_options(timeout=5.0).models.list()
-        return {"status": "online"}
-    except Exception:
-        logger.error("LLM backend health check failed.")
-        return {"status": "offline"}
+    """Pings every configured LLM backend once.
+
+    ``status`` is ``online`` when they all answer, ``offline`` when none do,
+    and ``degraded`` in between — a registry where one of three backends is
+    down is not the same outage as having no LLM at all, and the difference
+    matters to whoever is paged.
+    """
+    async def _ping(spec) -> bool:
+        try:
+            await get_async_ai_client(spec).with_options(timeout=5.0).models.list()
+            return True
+        except Exception:
+            return False
+
+    backends = _llm_backends()
+    results = await asyncio.gather(*[_ping(spec) for spec, _ in backends])
+
+    detail = [
+        {"api_url": spec.api_url, "models": sorted(model_ids), "status": "online" if ok else "offline"}
+        for (spec, model_ids), ok in zip(backends, results)
+    ]
+    online = sum(1 for ok in results if ok)
+    if online == len(results):
+        status = "online"
+    elif online == 0:
+        status = "offline"
+        logger.error("Every LLM backend failed its health check.")
+    else:
+        status = "degraded"
+        offline = [d["api_url"] for d in detail if d["status"] == "offline"]
+        logger.error(f"LLM backend health check failed for: {', '.join(offline)}")
+    return {"status": status, "backends": detail}
 
 
 async def get_health_status() -> dict:
@@ -75,12 +124,53 @@ async def get_system_stats() -> dict:
     }
 
 
-async def generate_api_key(app_name: str) -> dict:
+def _validate_model_scope(models: list[str] | None, default_model_id: str | None) -> None:
+    """Rejects a scope that names models this deployment does not have.
+
+    Checked at issue time so a typo surfaces here, to an admin who can fix it,
+    rather than as a 400 on the app's first request.
+    """
+    for model_id in models or []:
+        # resolve_model treats a falsy id as "unspecified" and hands back the
+        # default, so a blank entry would sail through and store an allowlist
+        # of [""] — a key that can never resolve anything and 400s forever.
+        if not model_id.strip():
+            raise HTTPException(status_code=400, detail="Model ids must not be blank.")
+        try:
+            resolve_model(model_id)
+        except UnknownModelError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if default_model_id:
+        try:
+            resolve_model(default_model_id, allowed=models or None)
+        except UnknownModelError:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"default_model '{default_model_id}' must be a configured model"
+                    + (" listed in models." if models else ".")
+                ),
+            )
+
+
+async def generate_api_key(
+    app_name: str, models: list[str] | None = None, default_model: str | None = None
+) -> dict:
+    # Named default_model to match the query parameter; bound to a local that
+    # does not shadow the registry accessor imported above.
+    default_model_id = default_model
+    _validate_model_scope(models, default_model_id)
     full_key = new_api_key()
-    await store_api_key(full_key, app_name)
-    await log_event("KEY_GENERATED", {"app_name": app_name})
+    await store_api_key(full_key, app_name, models=models, default_model=default_model_id)
+    await log_event("KEY_GENERATED", {"app_name": app_name, "models": models or "all"})
     logger.info(f"Generated new API Key for app: {app_name}")
-    return {"app_name": app_name, "api_key": full_key, "message": "Store this key safely. It will not be shown again."}
+    return {
+        "app_name": app_name,
+        "api_key": full_key,
+        "models": models or [],
+        "default_model": default_model_id,
+        "message": "Store this key safely. It will not be shown again.",
+    }
 
 
 async def list_api_keys() -> dict:
@@ -104,7 +194,14 @@ async def rotate_api_key(key_hash: str) -> dict:
     if not app_name:
         raise HTTPException(status_code=404, detail="API Key not found.")
     full_key = new_api_key()
-    await store_api_key(full_key, app_name)
+    # The replacement inherits the old key's model scope: rotating a key must
+    # not silently widen what it can reach.
+    await store_api_key(
+        full_key,
+        app_name,
+        models=entry.get("models"),
+        default_model=entry.get("default_model"),
+    )
     # From here the new key is live. A failure must not become a 500 that never
     # delivers it — the caller would retry and mint yet another key while the
     # stored one sits orphaned. Report the revocation outcome instead.
@@ -121,6 +218,8 @@ async def rotate_api_key(key_hash: str) -> dict:
     return {
         "app_name": app_name,
         "api_key": full_key,
+        "models": entry.get("models") or [],
+        "default_model": entry.get("default_model"),
         "revoked_key_hash": key_hash,
         "old_key_revoked": old_key_revoked,
         "message": (
@@ -140,8 +239,77 @@ async def revoke_api_key_by_hash(key_hash: str) -> dict:
     return {"status": "success", "message": "API Key permanently revoked."}
 
 
+async def get_model_registry() -> dict:
+    """The configured registry, as an operator sees it.
+
+    Unlike the app-facing ``/general-requests/models`` this is unscoped and
+    includes the backend each model sits on and the pool it draws from — it is
+    what the admin panel needs to render model scoping and per-pool capacity.
+
+    ``models`` is what this process is actually serving; ``file`` is the raw
+    document on disk (``null`` when there is none, meaning the registry is
+    synthesized from the env vars) and ``file_error`` says why it could not be
+    read when that happens. They differ exactly when the file has been edited
+    and the engine has not been restarted, which ``restart_required`` reports so
+    the panel can say so rather than implying a save took effect.
+    """
+    state = await asyncio.to_thread(registry_file_state)
+    return {
+        "default": default_model().id,
+        "roles": {role: resolve_role(role).id for role in ROLES},
+        "models": [
+            {
+                "id": spec.id,
+                "model": spec.model,
+                "api_url": spec.api_url,
+                "context_window": spec.context_window,
+                "pool": spec.pool,
+            }
+            for spec in list_models()
+        ],
+        "file": state["file"],
+        # Distinct from a missing file: an editor must refuse to overwrite a
+        # file it could not read.
+        "file_error": state["error"],
+        "restart_required": not state["matches_running"],
+        # Whether a save can succeed at all (the file is often mounted :ro).
+        "writable": state["writable"],
+    }
+
+
+async def save_model_registry(raw: dict | None) -> dict:
+    """Validates and writes ``models.yaml``. Does NOT affect this process.
+
+    The running registry — and the GPU pools derived from it at import — stay
+    exactly as they are until every process restarts, which is the only way a
+    multi-worker deployment can change registry without its workers disagreeing
+    with each other mid-request.
+    """
+    try:
+        await asyncio.to_thread(write_registry_file, raw)
+    except ModelConfigError as e:
+        # The document was rejected whole, so nothing was written.
+        raise HTTPException(status_code=400, detail=str(e))
+    except OSError as e:
+        logger.error(f"Could not write the registry file: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not write models.yaml — check that the file is mounted writable.",
+        )
+    await log_event("MODELS_UPDATED", {"models": [m.get("id") for m in (raw or {}).get("models", [])]})
+    logger.info("Model registry file updated; restart required for it to take effect.")
+    state = await asyncio.to_thread(registry_file_state)
+    return {
+        "status": "success",
+        "restart_required": not state["matches_running"],
+        "detail": "Saved. Restart the engine for the new registry to take effect.",
+    }
+
+
 async def get_app_usage(app_name: str) -> dict:
-    return await get_usage(app_name)
+    """Lifetime totals for one app, with the per-model split alongside them."""
+    usage, by_model = await asyncio.gather(get_usage(app_name), get_usage_by_model(app_name))
+    return {**usage, "by_model": by_model}
 
 
 async def get_app_daily_usage(app_name: str, days: int = 7) -> dict:

@@ -55,10 +55,20 @@
               <th class="th">Share</th>
             </tr>
           </thead>
-          <tbody class="divide-y divide-slate-700/40">
-            <template x-for="app in usage" :key="app.app_name">
-              <tr class="hover:bg-slate-700/20 transition-colors">
-                <td class="td font-medium text-slate-100" x-text="app.app_name"></td>
+          <!-- One <tbody> per app (valid HTML, and the single root x-for
+               needs) so an app can render its summary row plus an expanded
+               per-model breakdown. -->
+          <template x-for="app in usage" :key="app.app_name">
+            <tbody class="divide-y divide-slate-700/40">
+
+              <tr class="hover:bg-slate-700/20 transition-colors cursor-pointer"
+                  @click="toggleAppModels(app.app_name)"
+                  title="Show the per-model breakdown">
+                <td class="td font-medium text-slate-100">
+                  <span class="inline-block w-3 text-slate-500 transition-transform"
+                        :class="expandedApp === app.app_name ? 'rotate-90' : ''">›</span>
+                  <span x-text="app.app_name"></span>
+                </td>
                 <td class="td text-right" x-text="(app.requests || 0).toLocaleString()"></td>
                 <td class="td text-right text-slate-400" x-text="(app.prompt_tokens || 0).toLocaleString()"></td>
                 <td class="td text-right text-slate-400" x-text="(app.completion_tokens || 0).toLocaleString()"></td>
@@ -80,8 +90,33 @@
                   </div>
                 </td>
               </tr>
-            </template>
-          </tbody>
+
+              <!-- Per-model split, fetched on expand. An app whose traffic all
+                   predates model tracking simply has no rows to show. -->
+              <tr x-show="expandedApp === app.app_name" class="bg-black/20">
+                <td colspan="6" class="px-6 py-3">
+                  <p x-show="appModels(app.app_name).length === 0"
+                     class="text-xs text-slate-500">No per-model usage recorded for this app.</p>
+                  <div x-show="appModels(app.app_name).length > 0" class="space-y-1">
+                    <template x-for="row in appModels(app.app_name)" :key="row.model">
+                      <div class="flex items-center justify-between gap-4 py-1 border-b border-slate-700/30 last:border-0">
+                        <span class="text-xs font-mono text-slate-300 w-32 shrink-0" x-text="row.model"></span>
+                        <span class="text-xs text-slate-500 flex-1 text-right"
+                              x-text="(row.requests || 0).toLocaleString() + ' req'"></span>
+                        <span class="text-xs text-slate-500 flex-1 text-right"
+                              x-text="(row.prompt_tokens || 0).toLocaleString() + ' prompt'"></span>
+                        <span class="text-xs text-slate-500 flex-1 text-right"
+                              x-text="(row.completion_tokens || 0).toLocaleString() + ' completion'"></span>
+                        <span class="text-xs font-semibold text-slate-200 flex-1 text-right"
+                              x-text="(row.total_tokens || 0).toLocaleString() + ' total'"></span>
+                      </div>
+                    </template>
+                  </div>
+                </td>
+              </tr>
+
+            </tbody>
+          </template>
         </table>
       </div>
     </div>

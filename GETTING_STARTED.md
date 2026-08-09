@@ -33,6 +33,9 @@ cp .env.example .env
 AI_API_URL=http://localhost:8081
 AI_API_KEY=your-local-key
 MODEL_NAME=gemma3:12b
+# Optional: serve several models. Without a models.yaml the three vars above
+# are the whole registry, as a single model with the id "default".
+# MODELS_FILE=/app/models.yaml   # defaults to <project root>/models.yaml
 
 # GPU Concurrency
 GPU_CONCURRENCY=2       # max simultaneous interactive LLM calls
@@ -52,7 +55,8 @@ REDIS_URL=redis://localhost:6379/0
 # Session
 SESSION_TTL=86400       # seconds — default 24 hours
 CONTEXT_WINDOW=8192     # token budget per session (~4 chars/token estimate); at ~80% full,
-                        #   older exchanges are auto-compacted into an LLM-written summary
+                        #   older exchanges are auto-compacted into an LLM-written summary.
+                        #   A models.yaml entry may override this per model.
 
 # Vector store — pgvector (default, hybrid retrieval, needs Postgres)
 # or chroma (embedded, zero infrastructure, pure vector search)
@@ -77,6 +81,14 @@ EMBEDDING_DIMS=384
 - TLS (Upstash, remote): `rediss://:password@host:6380/0`
 
 ---
+
+### Serving more than one model
+
+Optional. A single `MODEL_NAME` is the default and needs nothing here. To offer
+several, drop a `models.yaml` next to `.env` (start from `models.yaml.example`)
+or use the admin panel's **Models** view — see
+[Adding a model](README.md#adding-a-model) for the full flow, including why the
+model you already serve is best kept under the id `default`.
 
 ## Running Locally
 

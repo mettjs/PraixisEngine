@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 from src.dependencies.security import verify_admin_credentials
 from src.controllers.admin_controller import (
     generate_api_key,
@@ -7,6 +7,8 @@ from src.controllers.admin_controller import (
     get_app_daily_usage,
     rotate_api_key,
     get_health_status,
+    get_model_registry,
+    save_model_registry,
     get_redis_health,
     get_vectordb_health,
     get_llm_health,
@@ -77,8 +79,22 @@ async def list_keys():
 
 
 @router.post("/keys/generate")
-async def create_app_key(app_name: str = Query(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$")):
-    return await generate_api_key(app_name)
+async def create_app_key(
+    app_name: str = Query(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$"),
+    models: list[str] = Query(
+        default=[],
+        # No pattern here: the ids are checked against the registry itself, so
+        # an unknown or malformed one is rejected by name rather than by shape.
+        description="Registry ids this key may use. Omit to allow every configured model.",
+    ),
+    default_model: str | None = Query(
+        default=None,
+        pattern=r"^[a-zA-Z0-9_-]{1,63}$",
+        description="What this key gets when a request names no model. Must be one of 'models' when that is set.",
+    ),
+):
+    """Issues a key, optionally scoped to a subset of the model registry."""
+    return await generate_api_key(app_name, models=models or None, default_model=default_model)
 
 
 @router.post("/keys/rotate")
@@ -96,6 +112,41 @@ async def delete_app_key_by_hash(key_hash: str):
 @router.delete("/sessions/{app_name}")
 async def wipe_sessions(app_name: str):
     return await delete_app_sessions(app_name)
+
+
+@router.get("/models")
+async def model_registry():
+    """Every configured model, its backend and its pool, plus the raw file."""
+    return await get_model_registry()
+
+
+@router.put("/models")
+async def update_model_registry(registry: dict = Body(...)):
+    """Validates and writes models.yaml.
+
+    The body is the whole document (``default`` / ``roles`` / ``pools`` /
+    ``models``) and replaces the file. A document the engine would refuse to
+    boot with is rejected with a 400 and nothing is written.
+
+    The body is **required**: deleting the registry is a separate DELETE, so a
+    forgotten payload cannot wipe it.
+
+    The change takes effect on **restart** — the running process keeps serving
+    the registry it started with, along with the GPU pools derived from it.
+    """
+    return await save_model_registry(registry)
+
+
+@router.delete("/models")
+async def delete_model_registry():
+    """Deletes models.yaml, returning the deployment to the single model its
+    ``MODEL_NAME`` / ``AI_API_URL`` env vars describe, under the id ``default``.
+
+    Destructive and deliberately its own verb: after the next restart every
+    request naming another model id is a 400, and API keys scoped to those ids
+    stop resolving.
+    """
+    return await save_model_registry(None)
 
 
 @router.get("/usage")

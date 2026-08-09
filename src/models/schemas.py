@@ -7,6 +7,10 @@ class ChatRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     system_prompt: str | None = None
     session_id: str | None = None
+    model: str | None = Field(
+        default=None, pattern=r"^[a-zA-Z0-9_-]{1,63}$",
+        description="Registry id of the LLM to answer with; omit for this key's default. See GET /general-requests/models.",
+    )
     stream: bool = True
     response_format: Literal["text", "json"] = "text"
 
@@ -17,6 +21,10 @@ class QuestionRequest(BaseModel):
     n_results: int = Field(default=5, ge=1, le=20)
     system_prompt: str | None = None
     metadata_filter: dict | None = None
+    model: str | None = Field(
+        default=None, pattern=r"^[a-zA-Z0-9_-]{1,63}$",
+        description="Registry id of the LLM to answer with; omit for this key's default. See GET /general-requests/models.",
+    )
     stream: bool = True
     response_format: Literal["text", "json"] = "text"
 
@@ -43,5 +51,9 @@ class CompareRequest(BaseModel):
     collection_name: str = Field(..., pattern=r"^[a-zA-Z0-9_-]{3,63}$")
     file_1: str = Field(..., min_length=1)
     file_2: str = Field(..., min_length=1)
+    model: str | None = Field(
+        default=None, pattern=r"^[a-zA-Z0-9_-]{1,63}$",
+        description="Registry id of the LLM to answer with; omit for this key's default. See GET /general-requests/models.",
+    )
     stream: bool = False
     response_format: Literal["text", "json"] = "text"

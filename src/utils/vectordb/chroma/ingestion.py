@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import uuid
 
 from src.utils.vectordb.base import StaleChunksError
@@ -14,6 +15,22 @@ from src.utils.vectordb.chroma.client import (
 )
 from src.utils.vectordb.chunking import character_chunk, semantic_chunk
 from src.utils.vectordb.embeddings import embed
+
+# One lock per collection, guarding the "was it empty → insert → roll back"
+# window below. Ingestion runs in a worker thread, so two uploads racing into
+# the same brand-new collection would otherwise both read count() == 0 and the
+# loser's rollback would delete the winner's chunks. Chroma has no
+# transactions, so this is the only way to make that decision atomic.
+#
+# The dict grows one small entry per collection ever written to in this
+# process, which is bounded by the deployment's collection count.
+_collection_locks: dict[str, threading.Lock] = {}
+_collection_locks_guard = threading.Lock()
+
+
+def _collection_lock(scoped: str) -> threading.Lock:
+    with _collection_locks_guard:
+        return _collection_locks.setdefault(scoped, threading.Lock())
 
 
 async def add_file_to_rag_db(
@@ -42,8 +59,9 @@ async def add_file_to_rag_db(
 
     def _run():
         ensure_name_fits(app_name, collection_name)
+        scoped = scoped_name(app_name, collection_name)
         collection = get_client().get_or_create_collection(
-            name=scoped_name(app_name, collection_name),
+            name=scoped,
             metadata={"app": app_name},
         )
         if not is_owned(collection, app_name):
@@ -63,17 +81,26 @@ async def add_file_to_rag_db(
         # a failed insert would strand it empty. That breaks the invariant the
         # deletion path maintains — a collection exists exactly as long as it
         # holds chunks — which pgvector gets for free (no rows inserted, no
-        # collection). Ownership was verified above and the collection holds
-        # nothing, so rolling it back can only drop something this app owns and
-        # that no one can retrieve from. A replace (old_ids non-empty) leaves
-        # count > 0, so an existing collection is never dropped here.
-        was_empty = collection.count() == 0
-        try:
-            collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
-        except Exception:
-            if was_empty:
-                drop_collection(collection_name, app_name)
-            raise
+        # collection). Ownership was verified above, so rolling an empty
+        # collection back can only drop something this app owns and that no one
+        # can retrieve from. A replace (old_ids non-empty) leaves count > 0, so
+        # an existing collection is never dropped here.
+        #
+        # The emptiness check, the insert and the rollback are held under one
+        # per-collection lock, and the rollback re-checks emptiness rather than
+        # trusting the reading taken before the insert: a concurrent upload into
+        # the same new collection may have succeeded in between, and dropping
+        # the collection would destroy its chunks after it was told they were
+        # stored. The lock covers this process; the re-check is what keeps a
+        # second worker or replica from doing the damage.
+        with _collection_lock(scoped):
+            was_empty = collection.count() == 0
+            try:
+                collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
+            except Exception:
+                if was_empty and collection.count() == 0:
+                    drop_collection(collection_name, app_name)
+                raise
         if old_ids:
             collection.delete(ids=old_ids)
 

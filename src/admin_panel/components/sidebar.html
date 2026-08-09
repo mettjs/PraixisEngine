@@ -32,6 +32,17 @@
       API Keys
     </button>
 
+    <button @click="navigate('models')"
+            :class="view === 'models' ? 'nav-item active' : 'nav-item'">
+      <svg class="w-4 h-4 shrink-0"><use href="#ic-cpu"/></svg>
+      Models
+      <!-- Saved-but-not-serving is the one state this view can get into, so it
+           is worth surfacing from anywhere in the panel. -->
+      <span x-show="restartRequired"
+            class="ml-auto w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"
+            title="models.yaml changed — restart the engine to apply"></span>
+    </button>
+
     <button @click="navigate('usage')"
             :class="view === 'usage' ? 'nav-item active' : 'nav-item'">
       <svg class="w-4 h-4 shrink-0"><use href="#ic-chart"/></svg>

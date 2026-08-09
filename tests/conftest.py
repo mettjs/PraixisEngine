@@ -10,7 +10,9 @@ BEFORE any ``src`` module binds its module-level clients:
 * The LLM → :class:`FakeLLM`, an in-process stand-in for ``AsyncOpenAI`` that
   supports streaming and non-streaming completions with usage blocks. Tests
   script it through the ``fake_llm`` fixture (``queue()`` replies or
-  exceptions); unscripted calls return ``DEFAULT_REPLY``.
+  exceptions); unscripted calls return ``DEFAULT_REPLY``. Every backend the
+  registry names resolves to the same instance, so a temp ``models.yaml``
+  pointing at several endpoints still needs no network.
 * Embeddings → a deterministic hash-based embedder, so no model download and
   no fastembed inference. Vectors are stable per text, which is all the
   chunking / retrieval code paths need.
@@ -25,6 +27,7 @@ schema idempotently, so the database needs no fixtures — only to exist.
 Run with: ``uv run pytest``
        or: ``VECTOR_BACKEND=pgvector uv run pytest``
 """
+import asyncio
 import hashlib
 import os
 import re
@@ -58,6 +61,12 @@ os.environ.update({
     ),
     "EMBEDDING_DIMS": str(EMBEDDING_DIMS),
     "REDIS_URL": "redis://fake-redis.invalid:6379/0",  # intercepted below
+    # Point the registry at a path that cannot exist, so the suite always
+    # exercises the synthesized single-model default. Leaving this unset would
+    # silently pick up a real ./models.yaml — the very file README and
+    # GETTING_STARTED tell developers to create — and both fail the registry
+    # tests and route the fakes through their live backend URLs.
+    "MODELS_FILE": os.path.join(_CHROMA_TMP, "no-such-models.yaml"),
     "AI_API_URL": "http://fake-llm.invalid",
     "AI_API_KEY": "test-key",
     "MODEL_NAME": "fake-model",
@@ -93,8 +102,12 @@ def _fake_from_url(url, **kwargs):
 
 _aioredis.Redis.from_url = _fake_from_url
 
-# ── 3. LLM → FakeLLM, before llm_runner / session_stream / compaction bind
-# their module-level ``_client = get_async_ai_client()``.
+# ── 3. LLM → FakeLLM, before src.utils.ai_client builds any real client.
+#
+# MODELS_FILE is pinned above to a path that does not exist, so the suite runs
+# against the registry synthesized from MODEL_NAME/CONTEXT_WINDOW — what a
+# single-model deployment gets. Registry parsing is covered directly in
+# test_units.py, and the multi-model API tests patch the registry in memory.
 
 DEFAULT_REPLY = "This is a fake model reply."
 _USAGE_PROMPT_TOKENS = 7
@@ -144,7 +157,7 @@ class FakeLLM:
         return SimpleNamespace(data=[])
 
     async def _create(self, model, messages, stream=False, stream_options=None, **extra):
-        self.calls.append({"messages": messages, "stream": stream, "extra": extra})
+        self.calls.append({"model": model, "messages": messages, "stream": stream, "extra": extra})
         reply = self.replies.pop(0) if self.replies else DEFAULT_REPLY
         if isinstance(reply, Exception):
             raise reply
@@ -163,7 +176,9 @@ FAKE_LLM = FakeLLM()
 
 import src.utils.ai_client as _ai_client  # noqa: E402
 
-_ai_client._client = FAKE_LLM  # type: ignore[assignment]
+# Patch the factory, not the cache: clients are keyed by (api_url, api_key), so
+# this covers every endpoint a test's registry may name.
+_ai_client._new_client = lambda api_url, api_key: FAKE_LLM  # type: ignore[assignment]
 
 # ── 4. Embeddings → deterministic hash vectors (no model download).
 # Width is EMBEDDING_DIMS, declared above because the env block needs it.
@@ -226,6 +241,59 @@ def marker_vectors() -> dict:
 
     path = Path(__file__).parent / "marker_vectors.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.fixture()
+def multi_model(monkeypatch):
+    """Swaps the process registry for a two-model one, the way a deployment
+    with a models.yaml would look. Returns it for id/name assertions."""
+    import src.models.registry as registry_module
+
+    registry = registry_module.build_registry({
+        "default": "smart",
+        "roles": {"utility": "fast", "background": "fast"},
+        "models": [
+            {"id": "fast", "model": "gemma4:e4b"},
+            {"id": "smart", "model": "qwen3:32b", "context_window": 32768},
+        ],
+    })
+    monkeypatch.setattr(registry_module, "_REGISTRY", registry)
+    return registry
+
+
+@pytest.fixture()
+def pooled_models(monkeypatch, redis_state):
+    """A registry that exercises every pool shape at once: a model on the
+    shared ``default`` pool, one on a named pool of its own, and a remote model
+    that takes no local slot.
+
+    Concurrency budgets are derived at import, so the buckets are rebuilt from
+    the patched registry and torn back down afterwards.
+    """
+    import src.models.registry as registry_module
+    import src.utils.concurrency as concurrency
+
+    registry = registry_module.build_registry({
+        "default": "fast",
+        "pools": {"big": 1},
+        "models": [
+            {"id": "fast", "model": "gemma4:e4b"},
+            {"id": "smart", "model": "qwen3:32b", "pool": "big"},
+            {"id": "cloud", "model": "gpt-4o", "api_url": "http://fake-cloud.invalid", "pool": "none"},
+        ],
+    })
+    monkeypatch.setattr(registry_module, "_REGISTRY", registry)
+    slots, hq_slots = concurrency._build_pools()
+    monkeypatch.setattr(concurrency, "_POOL_SLOTS", slots)
+    monkeypatch.setattr(concurrency, "_POOL_HQ_SLOTS", hq_slots)
+    asyncio.run(concurrency.reset_gpu_counter())
+    yield registry
+    # Drop the named pool's keys and restore the default pool the rest of the
+    # suite shares.
+    for key in redis_state.keys("gpu:*:big"):
+        redis_state.delete(key)
+    monkeypatch.undo()
+    asyncio.run(concurrency.reset_gpu_counter())
 
 
 @pytest.fixture()

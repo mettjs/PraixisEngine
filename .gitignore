@@ -17,7 +17,15 @@ logs/
 # Embedded Chroma backend data (VECTOR_BACKEND=chroma)
 chroma_data/
 
+# The real model registry: may hold plain API keys as well as ${VAR} refs.
+# models.yaml.example is the committed template.
+models.yaml
+
 # Local working notes (review companion, not part of the repo)
 NOTES.md
 
 .vscode
+
+# Local compose overlay (machine-specific mounts)
+docker-compose.override.yml
+

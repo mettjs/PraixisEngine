@@ -253,7 +253,11 @@ def test_document_summary_buffered_and_streaming(client, headers, fake_llm):
         f"/rag-db/knowledge_base/{collection}/files/doc.txt/summary", headers=headers
     )
     assert buffered.status_code == 200
-    assert buffered.json() == {"filename": "doc.txt", "content": DEFAULT_REPLY}
+    # The buffered body carries every marker the stream emits, so the model that
+    # produced the summary is named here too.
+    assert buffered.json() == {
+        "filename": "doc.txt", "model": "default", "content": DEFAULT_REPLY,
+    }
 
     streamed = client.get(
         f"/rag-db/knowledge_base/{collection}/files/doc.txt/summary",
@@ -355,3 +359,206 @@ def test_delete_file_then_collection(client, headers):
     assert client.delete(f"/rag-db/delete/{collection}", headers=headers).status_code == 404
     collections = client.get("/rag-db/list", headers=headers).json()
     assert collection not in collections["active_collections"]
+
+
+# ── Model selection ───────────────────────────────────────────────────────────
+
+def test_ask_answers_on_the_requested_model_and_reformulates_on_the_utility_one(
+    client, headers, fake_llm, multi_model
+):
+    """The two calls an /ask makes are routed independently: the answer goes to
+    the model the caller picked, the query rewrite to the utility role. Billing
+    a user's model for cheap chores is exactly what roles exist to prevent."""
+    collection = _collection()
+    _upload_text(client, headers, collection)
+    # A session with history is what triggers reformulation at all.
+    session_id = client.post(
+        "/general-requests/chat", json={"prompt": "Tell me about leave", "stream": False},
+        headers=headers,
+    ).json()["session_id"]
+
+    fake_llm.reset()
+    response = client.post(
+        "/rag-db/ask",
+        json={
+            "collection_name": collection,
+            "question": "And how many are there?",
+            "session_id": session_id,
+            "model": "smart",
+            "stream": False,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    reformulation, answer = fake_llm.calls[0], fake_llm.calls[-1]
+    assert reformulation["model"] == "gemma4:e4b"   # roles.utility
+    assert answer["model"] == "qwen3:32b"           # the request's model
+    assert answer["stream"] is True
+
+
+def test_ask_with_an_unknown_model_is_400(client, headers, fake_llm, multi_model):
+    collection = _collection()
+    _upload_text(client, headers, collection)
+    response = client.post(
+        "/rag-db/ask",
+        json={"collection_name": collection, "question": "anything", "model": "gpt-9"},
+        headers=headers,
+    )
+    assert response.status_code == 400
+    # Rejected before the reformulation call, so an unknown id costs nothing.
+    assert not fake_llm.calls
+
+
+def test_compare_accepts_a_model(client, headers, fake_llm, multi_model):
+    collection = _collection()
+    _upload_text(client, headers, collection, filename="a.txt")
+    _upload_text(client, headers, collection, filename="b.txt", text=_LONG_TEXT + " Overtime is paid.")
+    response = client.post(
+        "/rag-db/knowledge_base/compare",
+        json={"collection_name": collection, "file_1": "a.txt", "file_2": "b.txt", "model": "fast"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert {call["model"] for call in fake_llm.calls} == {"gemma4:e4b"}
+
+
+def test_document_summary_accepts_a_model_query_param(client, headers, fake_llm, multi_model):
+    collection = _collection()
+    _upload_text(client, headers, collection, filename="handbook.txt")
+    response = client.get(
+        f"/rag-db/knowledge_base/{collection}/files/handbook.txt/summary",
+        params={"model": "fast"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert {call["model"] for call in fake_llm.calls} == {"gemma4:e4b"}
+
+
+def test_ask_stream_emits_the_documented_marker_prefix(client, headers, fake_llm, multi_model):
+    """The exact prefix the SDK decoders are written against.
+
+    tests/marker_vectors.json pins how the three decoders *parse* this; this
+    pins what the engine actually *writes*, which is the half the vectors
+    cannot cover on their own.
+    """
+    collection = _collection()
+    _upload_text(client, headers, collection, filename="handbook.txt")
+    response = client.post(
+        "/rag-db/ask",
+        json={"collection_name": collection, "question": "How many vacation days?",
+              "model": "smart", "stream": True},
+        headers=headers,
+    )
+    session_id = response.text.split("]", 1)[0].removeprefix("[SESSION_ID:")
+    assert response.text.startswith(
+        f"[SESSION_ID:{session_id}]\n"
+        f"[MODEL:smart]\n"
+        f"[SEARCH_QUERY:How many vacation days?]\n"
+        f"[SOURCES:handbook.txt]\n"
+    ), response.text[:200]
+
+
+def test_document_summary_stream_emits_file_then_model(client, headers, fake_llm, multi_model):
+    collection = _collection()
+    _upload_text(client, headers, collection, filename="handbook.txt")
+    response = client.get(
+        f"/rag-db/knowledge_base/{collection}/files/handbook.txt/summary",
+        params={"model": "fast", "stream": "true"},
+        headers=headers,
+    )
+    assert response.text.startswith("[FILE:handbook.txt]\n[MODEL:fast]\n"), response.text[:120]
+
+
+def test_ask_stream_names_the_model_that_answered(client, headers, fake_llm, multi_model):
+    collection = _collection()
+    _upload_text(client, headers, collection)
+    response = client.post(
+        "/rag-db/ask",
+        json={"collection_name": collection, "question": "How many vacation days?",
+              "model": "smart", "stream": True},
+        headers=headers,
+    )
+    assert "[MODEL:smart]\n" in response.text
+    assert response.text.endswith(DEFAULT_REPLY)
+
+
+def test_ask_buffered_reports_the_model_as_a_field(client, headers, fake_llm, multi_model):
+    collection = _collection()
+    _upload_text(client, headers, collection)
+    body = client.post(
+        "/rag-db/ask",
+        json={"collection_name": collection, "question": "How many vacation days?",
+              "model": "smart", "stream": False},
+        headers=headers,
+    ).json()
+    assert body["model"] == "smart"
+
+
+@pytest.mark.skipif(VECTOR_BACKEND != "chroma", reason="the rollback path is chroma-only")
+def test_failed_upload_rollback_spares_a_concurrent_uploads_chunks(client, headers, monkeypatch):
+    """Two uploads racing into a brand-new collection: the loser's rollback
+    must not delete the winner's chunks.
+
+    Ingestion runs in a worker thread, so the loser can read ``count() == 0``
+    before the winner's insert lands. The winner is then told its file was
+    stored, and a rollback trusting that stale reading would drop the whole
+    collection out from under it. Reproduced by making the loser's collection
+    report empty exactly once (its pre-insert check) and then fail its insert.
+    """
+    from src.utils.vectordb.chroma import client as chroma_client
+    from src.utils.vectordb.chroma import ingestion
+
+    collection = _collection()
+    # The winner's upload succeeds normally and its chunks are in the store.
+    assert _upload_text(client, headers, collection, filename="winner.txt").status_code == 200
+
+    class _StaleEmptyCollection:
+        """Delegates to the real collection, but reports empty on the first
+        count() (the loser's pre-insert reading) and fails its insert."""
+
+        def __init__(self, real):
+            self._real = real
+            self._counted = False
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def count(self):
+            if not self._counted:
+                self._counted = True
+                return 0
+            return self._real.count()
+
+        def add(self, **_kwargs):
+            raise RuntimeError("insert failed after a concurrent upload succeeded")
+
+    real_get_client = ingestion.get_client
+
+    class _WrappedClient:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def get_or_create_collection(self, **kwargs):
+            return _StaleEmptyCollection(self._real.get_or_create_collection(**kwargs))
+
+    monkeypatch.setattr(ingestion, "get_client", lambda: _WrappedClient(real_get_client()))
+
+    dropped: list[str] = []
+    real_drop = ingestion.drop_collection
+    monkeypatch.setattr(ingestion, "drop_collection", lambda name, app: dropped.append(name))
+
+    # The losing upload fails, as it must — the point is what it takes with it.
+    failed = _upload_text(client, headers, collection, filename="loser.txt")
+    assert failed.status_code in (200, 500)
+
+    assert dropped == [], "rollback dropped a collection that a concurrent upload had filled"
+
+    monkeypatch.undo()
+    assert real_drop is ingestion.drop_collection
+    # The winner's document is still there and still retrievable.
+    files = client.get(f"/rag-db/{collection}/files", headers=headers).json()
+    assert files["files_stored"] == ["winner.txt"], files
+    assert chroma_client.get_owned_collection(collection, "testapp").count() > 0

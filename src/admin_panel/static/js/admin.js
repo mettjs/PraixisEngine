@@ -18,7 +18,7 @@ function adminApp() {
     view: 'dashboard',
 
     get viewTitle() {
-      const titles = { dashboard: 'Dashboard', keys: 'API Keys', usage: 'Usage & Tokens', audit: 'Audit Log', vector: 'Vector DB' };
+      const titles = { dashboard: 'Dashboard', keys: 'API Keys', models: 'Models', usage: 'Usage & Tokens', audit: 'Audit Log', vector: 'Vector DB' };
       return titles[this.view] ?? '';
     },
 
@@ -27,12 +27,20 @@ function adminApp() {
     },
 
     // ── Loading flags ──────────────────────────────────────────────────────────
-    loading: { dashboard: false, keys: false, usage: false, audit: false, vector: false },
+    loading: { dashboard: false, keys: false, models: false, usage: false, audit: false, vector: false },
 
     // ── Data stores ────────────────────────────────────────────────────────────
     health: { api: 'online', redis: null, vectordb: null, llm: null },
     stats:  {},
     gpu:    {},
+    registry:        { models: [], default: null, roles: {}, file: null },
+    draft:           { models: [], roles: {}, pools: {} },
+    draftError:      '',
+    modelsLoaded:    false,
+    restartRequired: false,
+    llmBackends:   [],
+    usageModels:   {},   // app_name -> per-model rows, fetched on expand
+    expandedApp:   null,
     keys:   [],
     usage:  [],
 
@@ -72,6 +80,8 @@ function adminApp() {
     modalData:       {},
     newAppName:      '',
     newAppNameError: '',
+    newKeyModels:        [],    // empty = unrestricted
+    newKeyDefaultModel:  '',
     modalLoading:    false,
 
     // ── Toast ──────────────────────────────────────────────────────────────────
@@ -162,6 +172,7 @@ function adminApp() {
       this.dashboardLoaded    = false;
       this.keysLoaded         = false;
       this.usageLoaded        = false;
+      this.modelsLoaded       = false;
       this.auditLoaded        = false;
       this.auditEvents        = [];
       this.vectorCollections  = [];
@@ -170,15 +181,47 @@ function adminApp() {
       this.vectorFiles        = {};
       this.vectorFilesLoading = {};
       this.vectorSearch       = { query: '', appName: '', collection: '', nResults: 5, loading: false, done: false, results: [], scoreType: 'rrf', expanded: {} };
+      // Everything below holds another operator's data — the registry payload
+      // includes plaintext api_key values, and the usage cache their token
+      // counts. On a shared machine both would render before the next admin's
+      // first fetch returns.
+      this.keys               = [];
+      this.usage              = [];
+      this.usageModels        = {};
+      this.expandedApp        = null;
+      this.registry           = { models: [], default: null, roles: {}, file: null };
+      this.draft              = { models: [], roles: {}, pools: {} };
+      this.draftError         = '';
+      this.restartRequired    = false;
+      this.llmBackends        = [];
+      this.stats              = {};
+      this.gpu                = {};
       this.stopAutoRefresh();
     },
 
     // ══════════════════════════════════════════════════════════════════════════
     // HTTP HELPER
     // ══════════════════════════════════════════════════════════════════════════
-    async req(method, path, params = null) {
-      const url = params ? path + '?' + new URLSearchParams(params) : path;
-      const r   = await fetch(url, { method, headers: { Authorization: 'Basic ' + this.authHeader } });
+    async req(method, path, params = null, jsonBody = undefined) {
+      // Array values become repeated params (?models=a&models=b), which is what
+      // FastAPI expects for a list query field; null/'' values are dropped.
+      const query = params
+        ? new URLSearchParams(
+            Object.entries(params).flatMap(([k, v]) =>
+              Array.isArray(v) ? v.map((item) => [k, item])
+                : (v === null || v === undefined || v === '' ? [] : [[k, v]])
+            )
+          ).toString()
+        : '';
+      const url = query ? path + '?' + query : path;
+      const init = { method, headers: { Authorization: 'Basic ' + this.authHeader } };
+      if (jsonBody !== undefined) {
+        // `null` is a meaningful body here (it deletes models.yaml), so the
+        // guard is on the argument being passed at all, not on its value.
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(jsonBody);
+      }
+      const r = await fetch(url, init);
       if (r.status === 401 && this.isLoggedIn) {
         // Credentials changed server-side (e.g. restart with new admin creds):
         // drop to the login screen instead of failing every call silently.
@@ -195,6 +238,7 @@ function adminApp() {
       this.view = v;
       if      (v === 'dashboard' && !this.dashboardLoaded) await this.loadDashboard();
       else if (v === 'keys'      && !this.keysLoaded)      await this.loadKeys();
+      else if (v === 'models'    && !this.modelsLoaded)    await this.loadModels();
       else if (v === 'usage'     && !this.usageLoaded)     await this.loadUsage();
       else if (v === 'vector'    && !this.vectorLoaded)    await this.loadVectorCollections();
       else if (v === 'audit'     && !this.auditLoaded) {
@@ -207,7 +251,14 @@ function adminApp() {
     async refreshCurrentView() {
       if      (this.view === 'dashboard') { this.dashboardLoaded = false; await this.loadDashboard(); }
       else if (this.view === 'keys')      await this.loadKeys();
-      else if (this.view === 'usage')     await this.loadUsage();
+      else if (this.view === 'models')    await this.loadModels();
+      else if (this.view === 'usage')     {
+        // The per-model rows are cached until asked for again, so a refresh
+        // that kept them would show them under totals they no longer sum to.
+        this.usageModels = {};
+        this.expandedApp = null;
+        await this.loadUsage();
+      }
       else if (this.view === 'vector')    {
         // Collapse any open row too — a row expanded over an empty file cache
         // would render blank (neither loading nor list).
@@ -236,6 +287,7 @@ function adminApp() {
   [
     _adminDashboard(),
     _adminKeys(),
+    _adminModels(),
     _adminUsage(),
     _adminAudit(),
     _adminVector(),

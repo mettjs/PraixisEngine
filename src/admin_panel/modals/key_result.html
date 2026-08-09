@@ -65,6 +65,23 @@
         </div>
       </div>
 
+      <!-- The scope this key carries. Rotation inherits it, so it is worth
+           showing on both paths. -->
+      <div x-show="(modalData.models && modalData.models.length) || modalData.default_model">
+        <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Model Scope</label>
+        <div class="flex flex-wrap items-center gap-1.5">
+          <template x-for="modelId in (modalData.models || [])" :key="'res-' + modelId">
+            <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-700/50 text-slate-300"
+                  x-text="modelId"></span>
+          </template>
+          <span x-show="!modalData.models || !modalData.models.length"
+                class="text-xs text-slate-500">All models</span>
+          <span x-show="modalData.default_model"
+                class="text-[11px] font-mono px-2 py-0.5 rounded bg-brand/15 text-brand"
+                x-text="'default: ' + modalData.default_model"></span>
+        </div>
+      </div>
+
     </div>
 
     <!-- Footer -->

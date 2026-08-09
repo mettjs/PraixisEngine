@@ -44,6 +44,28 @@
               </span>
             </div>
           </template>
+
+          <!-- Per-backend LLM detail: one row per endpoint, listing the models
+               it serves. Hidden on a single-backend deployment, where the
+               LLM.BACKEND row above already says everything. -->
+          <template x-if="llmBackends.length > 1">
+            <div class="pt-1.5 space-y-1.5">
+              <!-- Keyed on url + models: two credentials on one endpoint are
+                   two backends, and a duplicate :key would render only one. -->
+              <template x-for="backend in llmBackends" :key="backend.api_url + '|' + backend.models.join(',')">
+                <div class="flex items-center justify-between px-3 py-2 bg-black/20 border border-cyan-500/5 ml-3">
+                  <div class="flex items-center gap-2.5 min-w-0">
+                    <span class="w-1 h-1 rounded-full shrink-0"
+                          :class="statusDotColor(backend.status)"></span>
+                    <span class="text-[10px] font-mono text-slate-600 truncate"
+                          x-text="backend.models.join(', ')"></span>
+                  </div>
+                  <span class="text-[9px] font-mono text-cyan-900 truncate ml-3"
+                        x-text="backend.api_url"></span>
+                </div>
+              </template>
+            </div>
+          </template>
         </div>
       </div>
 
@@ -138,6 +160,33 @@
         <span class="text-[9px] font-mono text-cyan-950">0</span>
         <span class="text-[9px] font-mono text-cyan-950" x-text="gpu.slots_total ?? ''"></span>
       </div>
+
+      <!-- Per-pool breakdown. A pool is one physical backend, so this is the
+           only view that tells you *which* hardware is saturated. Shown once
+           there is more than one; the readout above is the default pool. -->
+      <template x-if="hasMultiplePools()">
+        <div class="mt-6 space-y-2.5">
+          <span class="text-[9px] font-mono tracking-[0.22em] text-cyan-700">// POOLS</span>
+          <template x-for="pool in gpuPools()" :key="pool.name">
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-[10px] font-mono text-slate-500" x-text="pool.name"></span>
+                <span class="text-[10px] font-mono text-slate-600">
+                  <span x-text="pool.slots_in_use"></span>/<span x-text="pool.slots_total"></span>
+                  <span x-show="pool.hq_slots_total > 0" class="text-cyan-900 ml-2"
+                        x-text="'+' + pool.hq_slots_total + ' bg'"></span>
+                </span>
+              </div>
+              <div class="h-1 bg-black/50 border border-cyan-500/8 overflow-hidden">
+                <div class="h-full transition-all duration-700"
+                     :class="gpuBarColor(pool)"
+                     :style="'width: ' + gpuBarWidth(pool)">
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
     </div>
 
   </div>

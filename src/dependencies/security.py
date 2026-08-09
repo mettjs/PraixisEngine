@@ -5,7 +5,7 @@ from fastapi import Depends, Request, Security, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.security.api_key import APIKeyHeader
 from src.config import ADMIN_USERNAME, ADMIN_PASSWORD
-from src.utils.store.api_keys import lookup_api_key
+from src.utils.store.api_keys import lookup_api_key_entry
 from src.utils.store.audit import log_event
 from src.utils.store.client import redis_client
 from src.utils.system.limiter import client_ip
@@ -22,12 +22,20 @@ _AUTH_FAIL_WINDOW = 60  # seconds
 
 
 async def verify_api_key(request: Request, api_key: str = Security(_api_key_header)) -> str:
-    """Checks Redis for the API Key (by SHA-256 hash) and returns the associated App Name."""
+    """Checks Redis for the API Key (by SHA-256 hash) and returns the associated App Name.
+
+    The whole entry — including any model scoping — is stashed on
+    ``request.state.caller`` for the few endpoints that need it (see
+    :func:`caller`). Returning just the app name keeps every existing
+    ``Depends(verify_api_key)`` signature untouched, and the entry is already
+    in hand, so nothing costs an extra Redis round-trip.
+    """
     if not api_key:
         logger.warning("Request done without an API Key.")
         raise HTTPException(status_code=403, detail="API Key header missing.")
 
-    app_name = await lookup_api_key(api_key)
+    entry = await lookup_api_key_entry(api_key)
+    app_name = entry.get("app_name") if entry else None
 
     if not app_name:
         fail_key = f"authfail:{client_ip(request)}"
@@ -45,8 +53,19 @@ async def verify_api_key(request: Request, api_key: str = Security(_api_key_head
         await asyncio.sleep(0.5)
         raise HTTPException(status_code=403, detail="Invalid or revoked API Key.")
 
+    request.state.caller = entry
     logger.info(f"API Key authenticated for app: {app_name}")
     return app_name
+
+
+def caller(request: Request) -> dict:
+    """The authenticated key's stored entry, for endpoints that need more than
+    the app name (its ``models`` allowlist and ``default_model``).
+
+    Depends on nothing: ``verify_api_key`` already put it on the request, and
+    every route reaching here is behind that dependency.
+    """
+    return getattr(request.state, "caller", None) or {}
 
 
 _security_basic = HTTPBasic()

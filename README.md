@@ -138,7 +138,7 @@ CHROMA_PATH=./chroma_data                                              # chroma 
 
 ## LLM Backends
 
-The app talks to the LLM through a single OpenAI-compatible endpoint (`AI_API_URL` + `MODEL_NAME`), so any compliant server works. Point it at one you already run, or bring up a bundled backend with a Docker overlay that composes on top of either vector stack.
+The app talks to LLMs through OpenAI-compatible endpoints, so any compliant server works. Point it at one you already run, or bring up a bundled backend with a Docker overlay that composes on top of either vector stack.
 
 | | External (default) | vLLM overlay | LiteLLM + Ollama overlay |
 |---|---|---|---|
@@ -152,6 +152,92 @@ The app talks to the LLM through a single OpenAI-compatible endpoint (`AI_API_UR
 Both overlays override `AI_API_URL`/`MODEL_NAME` to point at the in-network service, so you only set the model. Compose them with whichever vector overlay you use, e.g. `make up-chroma-vllm`.
 
 **Which engine?** vLLM and Ollama are both inference *engines* (they run the model); LiteLLM is a *proxy/router* that runs no models itself. vLLM's continuous batching gives multi-x throughput under concurrent load, but it's built around FP16/BF16 and tensor cores — it expects Ampere-or-newer hardware and won't meaningfully help (and may not even run) on older Pascal-class cards like the Tesla P40. Ollama (llama.cpp) runs quantized GGUF models well on CPUs and older GPUs and is the easy local option. Keep LiteLLM in front when you serve several models/servers and want one endpoint with routing and fallbacks — it's orthogonal to vLLM, not replaced by it.
+
+### Serving several models
+
+`AI_API_URL` + `MODEL_NAME` describe exactly one model, and that stays the whole story unless you say otherwise. To offer more than one, drop a **`models.yaml`** at the project root (see `models.yaml.example`); **without that file nothing changes** — the env vars synthesize a single model with the id `default` and every request goes to it, byte-identically to before.
+
+```yaml
+default: smart          # what a request naming no model gets
+
+roles:                  # internal chores resolve by role, not by the caller's model
+  utility: fast         # query reformulation, conversation compaction
+  background: fast      # hypothetical-question generation
+
+pools:                  # concurrency budget per physical backend
+  big: 1
+
+models:
+  - id: fast            # a minimal entry is two lines: it inherits AI_API_URL,
+    model: gemma4:e4b   #   AI_API_KEY and CONTEXT_WINDOW
+  - id: smart
+    model: qwen3:32b
+    context_window: 32768
+    pool: big
+  - id: cloud
+    model: gpt-4o
+    api_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}   # ${VAR} expansion — never commit a real key
+    pool: none                   # remote: consumes no local GPU slot
+    params:                      # splatted into every request to this model
+      temperature: 0.2
+```
+
+Ids are yours to choose and mean nothing to the engine — but see [Adding a model](#adding-a-model) for why the model you already serve is best called `default`.
+
+The file is parsed and validated **at startup**: an unknown `default`, a duplicate `id`, a role pointing at a missing model, or an unset `${VAR}` aborts the boot rather than failing the first request that happens to hit it.
+
+Four ideas are worth knowing:
+
+- **Roles keep cheap work cheap.** Query reformulation, compaction and background question generation resolve through `roles`, independently of what the caller asked for — routing a user's chat to `cloud` never silently bills those chores to `cloud` too. Both roles default to the registry default, which is why most deployments configure nothing.
+- **A pool is one physical backend.** Models that share hardware share a pool id and therefore its budget. `pool: default` is the existing `gpu:slots` bucket, sized by `GPU_CONCURRENCY` unless the `pools:` block names `default` explicitly (which overrides it); other pools are sized the same way; `pool: none` marks a remote model that takes no local slot at all. `GET /api/system/gpu` reports every pool separately.
+- **Context windows are per model.** A session is compacted against the window of the model that will consume it, so moving a conversation to a smaller model behaves correctly. Clients see each window in `GET /general-requests/models`.
+- **Keys can be scoped.** `POST /api/system/keys/generate` accepts `models` and `default_model`, so one app's key can be restricted to the cheap models while another's reaches everything. Absent = unrestricted, so existing keys are unaffected; rotation inherits the scope.
+
+Callers select a model per request (`"model": "smart"` on `/chat` and `/ask`, a `model` form/query field on the summary endpoints), a session stays on the model it was last given, and every streamed answer carries a `[MODEL:<id>]` marker naming what actually ran. Per-model token usage lands under `by_model` on `GET /api/system/usage/{app}`.
+
+### Adding a model
+
+**Name your existing model `default`.** With no `models.yaml`, the synthesized entry has the id `default`, so keeping that id for the model you already serve means clients that hardcoded `"model": "default"` keep working. Any id is legal — the name carries no meaning to the engine — but this one is free compatibility.
+
+1. **Declare it.** Either edit `models.yaml` directly, or use the admin panel's [Models view](#managing-models-from-the-panel). Going from one model to two is the step that deserves care: once the file exists the env vars stop synthesizing an entry and become *defaults for entries*, so declare the model you already run alongside the new one.
+
+   ```yaml
+   default: default            # what a request naming no model gets
+   models:
+     - id: default             # the model you were already serving
+       model: gemma3:12b
+     - id: smart               # the new one
+       model: qwen3:32b
+       context_window: 32768
+   ```
+
+   Only `id` and `model` are required; `api_url`, `api_key`, `context_window` and `pool` fall back to the env vars.
+
+2. **Pick its pool.** Same hardware as an existing model → the same `pool` id, so they share one budget. Its own hardware → a new name, sized in `pools:`. A remote/cloud endpoint → `pool: none`, which takes no local slot at all. This is the field most likely to be got wrong, and getting it wrong means either over-subscribing a GPU or reserving capacity nothing can use.
+
+3. **Leave `roles:` alone** unless you want the new model doing query reformulation, compaction or background question generation. Those stay on the cheap model on purpose.
+
+4. **Restart the engine.** The registry is parsed at import, so there is no hot reload; a malformed file aborts the boot rather than failing the first request. Redis needs nothing manual — a new pool's buckets are filled on startup.
+
+5. **Verify, in this order:**
+
+   ```
+   GET /api/system/models        # admin: is it there, on the pool and backend you meant?
+   GET /api/system/health/llm    # admin: does its backend answer?
+   GET /api/system/gpu           # admin: does the new pool show its budget?
+   GET /general-requests/models  # app key: can this caller actually use it?
+   ```
+
+   The last one is the real check — it is key-scoped, so it answers a question the admin views cannot.
+
+6. **Grant access if needed.** Keys with no allowlist reach every model, so a new entry is live for them immediately. Scoped keys are the exception: there is no endpoint to edit a key's scope (rotation deliberately *inherits* it, so rotating never silently widens a key), so a scoped app needs a newly issued key to reach a new model.
+
+Clients then pass `model` per request, or call `GET /general-requests/models` to discover what they may use. A session stays on the model it was last given.
+
+> `params` may not set `model`, `messages`, `stream` or `stream_options` — the engine sets those per request, and a collision is rejected when the file is parsed rather than failing every call to that model.
+
+> `drop_params: true` in `litellm_config.yaml` silently drops params a model doesn't support. With per-model `params` in the registry that failure mode is wider: a `temperature` can vanish with no error. Check your proxy's behaviour if a per-model param seems to have no effect.
 
 ---
 
@@ -345,6 +431,16 @@ When streaming, the first line is `[FILE:<filename>]`, then for multi-chunk docu
 ```
 
 Returns `413 Request Entity Too Large` if the file exceeds 20 MB. The format is detected from the filename extension, falling back to the part's `Content-Type` header, then to magic bytes (see [RAG Upload](#rag-upload--post-rag-dbupload)).
+
+---
+
+### Model Selection
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/general-requests/models` | The models this API key may use — `{"models": [{"id", "context_window"}], "default"}`. Scoped to the key: a model it may not reach is not listed, and naming one is a `400` identical to naming an unknown id |
+
+Every generating endpoint takes an optional model: `model` in the JSON body of `/chat`, `/rag-db/ask` and `/knowledge_base/compare`, a `model` form field on `/file_summary`, and a `model` query param on the document summary. Omit it and the key's default answers (falling back to the registry's). Streamed answers lead with a `[MODEL:<id>]` marker and buffered ones carry a `model` field, both naming what actually ran. See [LLM Backends](#llm-backends) for configuring the registry.
 
 ---
 
@@ -561,18 +657,21 @@ All admin endpoints require HTTP Basic Auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD`
 | `GET` | `/api/system/health` | Aggregate health of Redis, vector store, and LLM backend |
 | `GET` | `/api/system/health/redis` | Redis health only |
 | `GET` | `/api/system/health/vectordb` | Vector store health only (active backend) |
-| `GET` | `/api/system/health/llm` | LLM backend health only |
+| `GET` | `/api/system/health/llm` | LLM backend health — pings each configured backend once (deduped by endpoint + credential) and lists them under `backends`. `status` is `online`, `offline`, or `degraded` when only some answer |
+| `GET` | `/api/system/models` | The configured model registry: every model with its backend, pool and context window, plus the default, the role assignments, the raw `models.yaml` (`file`, or `file_error` when it cannot be read), whether it is `writable`, and `restart_required` when the file no longer matches what is being served |
+| `PUT` | `/api/system/models` | Replace `models.yaml` with the posted document. Validated whole — a registry that would not boot is a `400` and nothing is written. Body required. Takes effect on **restart** |
+| `DELETE` | `/api/system/models` | Delete `models.yaml`, returning the deployment to the single model its env vars describe. Destructive: after the restart, requests naming other ids are `400` and keys scoped to them stop resolving |
 | `GET` | `/api/system/stats` | Active sessions, collection count, total vector chunks |
-| `GET` | `/api/system/keys` | List all provisioned keys (preview + created_at) and their app names |
-| `POST` | `/api/system/keys/generate?app_name=` | Generate a new API key |
-| `POST` | `/api/system/keys/rotate?key_hash=` | Rotate a key: issues a new key for the owning app, then revokes the old one — no zero-key window |
+| `GET` | `/api/system/keys` | List all provisioned keys (preview + created_at + model scope) and their app names |
+| `POST` | `/api/system/keys/generate?app_name=&models=&default_model=` | Generate a new API key. `models` (repeatable) scopes it to a subset of the registry — omit for every model; `default_model` picks what it gets when a request names none. Both are validated against the registry |
+| `POST` | `/api/system/keys/rotate?key_hash=` | Rotate a key: issues a new key for the owning app, then revokes the old one — no zero-key window. The replacement inherits the old key's model scope |
 | `DELETE` | `/api/system/keys/revoke-by-hash?key_hash=` | Revoke a key by its stored SHA-256 hash |
 | `DELETE` | `/api/system/sessions/{app_name}` | Force-wipe all active sessions for a specific app |
 | `GET` | `/api/system/usage` | Token usage totals across all apps |
-| `GET` | `/api/system/usage/{app_name}` | Token usage totals for a specific app |
+| `GET` | `/api/system/usage/{app_name}` | Token usage totals for a specific app, plus a `by_model` breakdown |
 | `GET` | `/api/system/usage/{app_name}/daily?days=7` | Per-UTC-day usage for the last N days (1–90), newest first; daily buckets are kept 90 days |
-| `GET` | `/api/system/gpu` | Current GPU slot usage for both pools — interactive (`slots_*`) and reserved question-generation (`hq_slots_*`) |
-| `POST` | `/api/system/gpu/reset` | Rebuild both GPU slot queues to `GPU_CONCURRENCY` / `HQ_GPU_CONCURRENCY` tokens (use after a crash leaked slots) |
+| `GET` | `/api/system/gpu` | Current GPU slot usage. Top-level fields describe the `default` pool — interactive (`slots_*`) and reserved question-generation (`hq_slots_*`) — and `pools` reports every configured pool separately |
+| `POST` | `/api/system/gpu/reset` | Rebuild every pool's slot queues to its configured token count (use after a crash leaked slots) |
 | `GET` | `/api/system/audit?limit=100&offset=0` | Last N audit events across all apps, newest first |
 | `GET` | `/api/system/audit/{app_name}` | Last N audit events for a specific app |
 | `GET` | `/api/system/vector/search?app_name=&collection_name=&query=&n_results=5` | Semantic search inside a collection |
@@ -671,11 +770,33 @@ Chat content and RAG query text are deliberately not logged.
 
 A browser-based control panel is served at `GET /admin`. It provides the same functionality as the admin API endpoints through a visual interface:
 
-- **Overview** — live service health, active session count, vector chunk count, GPU slot utilization
-- **API Keys** — generate keys, revoke keys, wipe app sessions
-- **Token Usage** — per-app prompt/completion token breakdown
+- **Overview** — live service health (per LLM backend, with a `degraded` state when only some answer), active session count, vector chunk count, and GPU slot utilization broken down per pool
+- **Models** — the LLM registry: what this process is serving, and an editor for `models.yaml` (see below)
+- **API Keys** — generate keys (optionally scoped to a subset of models, with a default), rotate, revoke, wipe app sessions
+- **Token Usage** — per-app prompt/completion token breakdown; expand an app for its per-model split
 - **Vector DB** — browse collections, delete collections or files, run semantic search queries
 - **Audit Log** — paginated event log with per-app filtering
+
+### Managing models from the panel
+
+The **Models** view shows two things that are deliberately kept apart:
+
+- **Serving now** — the registry *this process started with*, including each model's backend, pool, context window and role assignments. This is the truth about what requests are hitting.
+- **models.yaml** — the file on disk, as an editable form. Saving validates the whole document and writes the file.
+
+**A save does not change what is serving.** The registry is parsed once at startup and the GPU pools are derived from it, so the panel writes the file and tells you a restart is needed — an amber marker appears next to *Models* in the sidebar, and a banner explains it. That boundary is deliberate: reloading in-process would leave a multi-worker or multi-replica deployment with workers disagreeing about which models exist and how big their pools are, which is far worse than an explicit restart.
+
+Two behaviours worth knowing:
+
+- **Validation happens before anything is written.** A document the engine would refuse to boot with — a duplicate id, a `default` naming nothing, a role pointing at a missing model — is rejected with the same message that would have aborted startup, and the existing file is left untouched. You cannot save yourself into a deployment that won't come back up. The same holds for I/O failures: the new content is written elsewhere first, so a full disk or a permission error leaves the old registry intact rather than truncating it.
+- **An unreadable file is not an absent one.** If `models.yaml` exists but does not parse, the view says so and refuses to save over it, rather than presenting an empty editor that would overwrite something recoverable. A file mounted read-only is reported up front too, instead of surfacing as a failed save.
+- **The editor round-trips the file, not the resolved registry.** Fields you leave blank stay blank, so a model that inherits `AI_API_URL` keeps inheriting it instead of having today's value frozen into the file, and fields the form does not render — per-model `params` above all — are preserved as written. On a deployment with no `models.yaml` yet, the form is seeded from the single env-var model, so adding a second one never silently drops the first.
+
+Removing the file (**Remove file**) returns the deployment to the single model its env vars describe, under the id `default`. Anything naming another id gets a `400` after the restart, and keys scoped to those ids stop resolving — the confirmation says so.
+
+The file must be mounted **writable** for the editor to save. `docker-compose.yml` carries the mount commented out; uncomment it as `./models.yaml:/app/models.yaml` (no `:ro`). Keeping `:ro` is a legitimate choice if you'd rather the registry only ever change through a deploy — the panel then reports the write failure rather than pretending the save worked.
+
+One consequence of that mount shape: Docker makes `models.yaml` its own mountpoint, so the engine cannot rename a new file over it (`EBUSY`, whoever owns it) and falls back to writing in place. Outside a container the write stays atomic — temp file, then rename — so only the bind-mounted case trades that away, which is the price of the editor working at all on the deployment the docs recommend.
 
 Open it in a browser and authenticate with `ADMIN_USERNAME` / `ADMIN_PASSWORD`:
 

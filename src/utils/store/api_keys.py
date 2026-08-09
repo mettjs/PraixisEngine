@@ -21,28 +21,47 @@ def hash_api_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode()).hexdigest()
 
 
-async def store_api_key(full_key: str, app_name: str) -> None:
-    value = json.dumps({
+async def store_api_key(
+    full_key: str,
+    app_name: str,
+    models: list[str] | None = None,
+    default_model: str | None = None,
+) -> None:
+    """Stores a key entry.
+
+    ``models`` scopes the key to a subset of the registry and ``default_model``
+    picks what it gets when a request names none. Both are omitted from the
+    stored JSON when unset — an entry without them means "every model", which
+    is what every key issued before model scoping existed already means.
+    """
+    entry = {
         "app_name": app_name,
         "key_preview": full_key[:14] + "...",
         "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
-    })
-    await redis_client.set(f"apikey:{hash_api_key(full_key)}", value)
+    }
+    if models:
+        entry["models"] = list(models)
+    if default_model:
+        entry["default_model"] = default_model
+    await redis_client.set(f"apikey:{hash_api_key(full_key)}", json.dumps(entry))
 
 
-async def lookup_api_key(full_key: str) -> str | None:
+async def lookup_api_key_entry(full_key: str) -> dict | None:
+    """The full stored entry for a raw key, or None when it is unknown."""
     data = await redis_client.get(f"apikey:{hash_api_key(full_key)}")
     if not isinstance(data, str):
         return None
     try:
-        return json.loads(data).get("app_name")
+        entry = json.loads(data)
     except json.JSONDecodeError:
         return None
+    return entry if isinstance(entry, dict) else None
 
 
 async def get_api_key_entry(key_hash: str) -> dict | None:
     """The stored metadata for a key hash (``app_name``, ``key_preview``,
-    ``created_at``), or None when the hash is unknown."""
+    ``created_at``, and optionally ``models`` / ``default_model``), or None
+    when the hash is unknown."""
     data = await redis_client.get(f"apikey:{key_hash}")
     if not isinstance(data, str):
         return None
@@ -67,6 +86,10 @@ async def list_all_api_keys() -> list[dict]:
                 "app_name": data.get("app_name"),
                 "key_preview": data.get("key_preview"),
                 "created_at": data.get("created_at"),
+                # Absent means unrestricted; the admin panel renders that
+                # difference, so the fields are always present in the response.
+                "models": data.get("models") or [],
+                "default_model": data.get("default_model"),
                 "key_hash": str(redis_key).split(":", 1)[1],
             })
         except (json.JSONDecodeError, AttributeError):

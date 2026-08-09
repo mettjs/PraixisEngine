@@ -1,23 +1,32 @@
 """Conversation compaction: folds older exchanges into an LLM-written summary.
 
-Sessions are bounded by CONTEXT_WINDOW (a token budget, estimated at ~4 chars
-per token) instead of a fixed message count. When a session approaches the
+Sessions are bounded by the chat model's context window (a token budget,
+estimated at ~4 chars per token) instead of a fixed message count. When a session approaches the
 budget, everything except the most recent exchanges is replaced by a single
 summary message, so long conversations keep their context instead of silently
 losing their oldest turns.
 
-The summarization call here uses the raw client WITHOUT acquiring a GPU slot —
-the caller must already hold one (the chat/RAG controllers acquire it before
-their stream starts; the standalone compact endpoint acquires its own).
+Two models are in play, and they are deliberately different: the budget is
+measured against the **chat** model's context window (that model is the one
+that has to swallow the history), while the summarization call itself runs on
+the **utility** role, so a chat routed to an expensive model does not bill its
+housekeeping there too.
+
+That split is also why the caller must say which pool it already holds. The
+summarization call needs capacity on the *utility* model's backend, and the
+slot the caller is holding only covers the chat model's. When the two pools
+coincide — every single-pool deployment — reusing the held slot is both correct
+and necessary: acquiring a second token from the same bucket while holding one
+is a deadlock under load. When they differ, the held slot buys nothing on the
+utility backend and this module takes its own.
 """
-from src.config import CONTEXT_WINDOW as _CONTEXT_WINDOW, MODEL_NAME as _MODEL_NAME
+from src.models.registry import ModelSpec, resolve_role
 from src.utils.ai_client import get_async_ai_client, record_llm_usage
+from src.utils.concurrency import gpu_slot
 
-_client = get_async_ai_client()
-
-# Rough, language-agnostic token estimate used against CONTEXT_WINDOW.
+# Rough, language-agnostic token estimate used against the model's window.
 _CHARS_PER_TOKEN = 4
-# Compact when the history estimate crosses this fraction of CONTEXT_WINDOW,
+# Compact when the history estimate crosses this fraction of that window,
 # leaving the remainder as headroom for the completion (and RAG context).
 _TRIGGER_RATIO = 0.8
 # Most recent user+assistant pairs kept verbatim through a compaction.
@@ -35,12 +44,25 @@ _SUMMARIZE_SYSTEM_PROMPT = (
 )
 
 
+async def _summarize(spec: ModelSpec, transcript: str):
+    return await get_async_ai_client(spec).chat.completions.create(
+        model=spec.model,
+        messages=[
+            {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
+            {"role": "user", "content": transcript},
+        ],  # type: ignore[arg-type]
+        **spec.params,
+    )
+
+
 def estimate_tokens(history: list[dict[str, str]]) -> int:
     return sum(len(m.get("content", "")) for m in history) // _CHARS_PER_TOKEN
 
 
-def needs_compaction(history: list[dict[str, str]]) -> bool:
-    return estimate_tokens(history) >= int(_CONTEXT_WINDOW * _TRIGGER_RATIO)
+def needs_compaction(history: list[dict[str, str]], spec: ModelSpec) -> bool:
+    """``spec`` must be the model that will *consume* this history, not the
+    utility model that writes the summary."""
+    return estimate_tokens(history) >= int(spec.context_window * _TRIGGER_RATIO)
 
 
 def _split_history(
@@ -76,12 +98,18 @@ async def compact_history(
     history: list[dict[str, str]],
     app_name: str,
     session_id: str,
+    held_pool: str,
 ) -> list[dict[str, str]]:
     """Returns a compacted copy of ``history``; the original is not mutated.
 
     If there is nothing to fold (conversation still fits in the verbatim
-    window), the history is returned unchanged. The caller persists the result
-    and must hold a GPU slot.
+    window), the history is returned unchanged. The summary is written by the
+    ``utility`` role's model. The caller persists the result.
+
+    ``held_pool`` is the pool the caller already holds a slot in. A slot is
+    taken here only when the utility model draws from a *different* pool — see
+    the module docstring for why reusing the caller's slot is required when
+    they match.
     """
     preamble, older, recent = _split_history(history)
     if not any(m.get("role") != "system" for m in older):
@@ -90,14 +118,14 @@ async def compact_history(
     transcript = "\n\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in older
     )
-    response = await _client.chat.completions.create(
-        model=_MODEL_NAME,
-        messages=[
-            {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
-            {"role": "user", "content": transcript},
-        ],  # type: ignore[arg-type]
-    )
-    await record_llm_usage(response, app_name, session_id=session_id)
+    spec = resolve_role("utility")
+    if spec.pool == held_pool:
+        # Same bucket: the caller's slot already covers this call.
+        response = await _summarize(spec, transcript)
+    else:
+        async with gpu_slot(spec.pool):
+            response = await _summarize(spec, transcript)
+    await record_llm_usage(response, app_name, session_id=session_id, model_id=spec.id)
     summary = response.choices[0].message.content
     if not summary:
         raise RuntimeError("Compaction LLM call returned no content.")

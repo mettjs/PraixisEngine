@@ -8,13 +8,16 @@ owned by ``SlotReleasingStreamingResponse`` in the controller, not here.
 import asyncio
 from collections.abc import AsyncGenerator
 
-from src.config import MODEL_NAME as _MODEL_NAME
+from src.models.registry import ModelSpec
 from src.services.compaction import compact_history, needs_compaction
 from src.utils.ai_client import get_async_ai_client, record_llm_usage
-from src.utils.store.sessions import get_or_create_session, persist_history
+from src.utils.store.sessions import (
+    bind_session_model,
+    get_or_create_session,
+    persist_history,
+    touch_session_model,
+)
 from src.utils.system.logger import logger
-
-_client = get_async_ai_client()
 
 # Strong references to in-flight persistence tasks: a persist started inside a
 # cancelled scope (client disconnect) must survive its caller and complete.
@@ -24,13 +27,24 @@ _persist_tasks: set[asyncio.Task] = set()
 async def open_user_turn(
     app_name: str,
     user_message: str,
+    spec: ModelSpec,
     session_id: str | None = None,
     system_prompt: str | None = None,
+    model_was_explicit: bool = False,
 ) -> tuple[str, list[dict[str, str]]]:
     """Resolves the session, appends the user message, and persists it.
 
+    The session is also bound to ``spec``, but only when that is the caller's
+    choice to make: a new session records what answered it, and an explicit
+    per-turn override sticks for the turns that follow, so a client can escalate
+    mid-conversation without repeating itself. A ``spec`` that is merely the
+    *fallback* for a request naming no model must NOT overwrite an existing
+    binding — a key scoped away from the bound model would otherwise rewrite the
+    session for every other key that shares it. Its TTL is still refreshed, so
+    the binding lives exactly as long as the history does.
+
     Persisting before the LLM call means the user's message survives even if
-    generation fails afterwards. When the history approaches the CONTEXT_WINDOW
+    generation fails afterwards. When the history approaches ``spec``'s context
     budget it is auto-compacted first — safe here because both callers (chat
     and RAG) already hold the GPU slot the compaction call needs. A compaction
     failure falls back to the uncompacted history rather than failing the turn.
@@ -40,10 +54,20 @@ async def open_user_turn(
         system_prompt=system_prompt,
         app_name=app_name,
     )
+    # A returned id that differs from the requested one means the session was
+    # just created (or the old one had expired), so there is no binding to
+    # preserve and this turn's model is the one to record.
+    is_new_session = active_session_id != (session_id or "")
+    if model_was_explicit or is_new_session:
+        await bind_session_model(app_name=app_name, session_id=active_session_id, model_id=spec.id)
+    else:
+        await touch_session_model(app_name=app_name, session_id=active_session_id)
     history.append({"role": "user", "content": user_message})
-    if needs_compaction(history):
+    if needs_compaction(history, spec):
         try:
-            history = await compact_history(history, app_name=app_name, session_id=active_session_id)
+            history = await compact_history(
+                history, app_name=app_name, session_id=active_session_id, held_pool=spec.pool,
+            )
             logger.info(f"Auto-compacted session {active_session_id} (app: {app_name}).")
         except Exception as e:
             logger.warning(
@@ -58,6 +82,7 @@ async def stream_assistant_turn(
     app_name: str,
     session_id: str,
     history: list[dict[str, str]],
+    spec: ModelSpec,
     extra: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Streams a completion, then appends the accumulated reply to ``history``
@@ -78,12 +103,12 @@ async def stream_assistant_turn(
 
     full_response = ""
     try:
-        response = await _client.chat.completions.create(  # type: ignore[call-overload]
-            model=_MODEL_NAME,
+        response = await get_async_ai_client(spec).chat.completions.create(  # type: ignore[call-overload]
+            model=spec.model,
             messages=messages,  # type: ignore[arg-type]
             stream=True,
             stream_options={"include_usage": True},
-            **(extra or {}),
+            **{**spec.params, **(extra or {})},
         )
         usage_recorded = False
         async for chunk in response:
@@ -92,7 +117,7 @@ async def stream_assistant_turn(
                 full_response += token
                 yield token
             if not usage_recorded and getattr(chunk, "usage", None):
-                await record_llm_usage(chunk, app_name, session_id=session_id)
+                await record_llm_usage(chunk, app_name, session_id=session_id, model_id=spec.id)
                 usage_recorded = True
     finally:
         if full_response:

@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncGenerator
+from src.models.registry import ModelSpec, resolve_role
 from src.utils.file_parser import chunk_text
 from src.services.llm_runner import call_llm, map_calls_iter, stream_llm
 from src.services.session_stream import open_user_turn, stream_assistant_turn
@@ -11,9 +12,11 @@ async def generate_rag_answer(
     app_name: str,
     context_chunks: list[dict[str, str]],
     search_query: str,
+    spec: ModelSpec,
     system_prompt: str | None = None,
     session_id: str | None = None,
     response_format: str = "text",
+    model_was_explicit: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Generates an answer to a question based only on the context provided by the collection.
 
@@ -31,8 +34,10 @@ async def generate_rag_answer(
     active_session_id, history = await open_user_turn(
         app_name=app_name,
         user_message=question,
+        spec=spec,
         session_id=session_id,
         system_prompt=system_prompt,
+        model_was_explicit=model_was_explicit,
     )
 
     formatted_chunks = [f"[Source: {chunk['source']}]\n{chunk['text']}" for chunk in context_chunks]
@@ -43,6 +48,7 @@ async def generate_rag_answer(
     temp_history = history[:-1] + [{"role": "user", "content": augmented_question}]
 
     yield f"[SESSION_ID:{active_session_id}]\n"
+    yield f"[MODEL:{spec.id}]\n"
     yield f"[SEARCH_QUERY:{search_query}]\n"
     unique_sources = list({chunk["source"] for chunk in context_chunks})
     yield f"[SOURCES:{encode_source_list(unique_sources)}]\n"
@@ -56,6 +62,7 @@ async def generate_rag_answer(
         app_name=app_name,
         session_id=active_session_id,
         history=history,
+        spec=spec,
         extra=extra,
     ):
         yield token
@@ -68,6 +75,10 @@ async def reformulate_query(
 
     Returns the question unchanged when it introduces a new, independent topic so that
     stale context from prior exchanges does not pollute an unrelated search query.
+
+    Runs on the ``utility`` role, not on the model answering the question:
+    rewriting a query is cheap work and should stay on the cheap model even
+    when the answer itself is routed elsewhere.
     """
     if len(history) <= 1:
         return latest_question
@@ -91,6 +102,7 @@ async def reformulate_query(
             {"role": "user", "content": user_msg},
         ],
         app_name,
+        resolve_role("utility"),
         session_id=session_id,
     )
     return content.strip() if content else latest_question
@@ -102,6 +114,7 @@ async def _map_reduce_stream(
     reduce_prompt: str,
     single_chunk_prompt: str,
     app_name: str,
+    spec: ModelSpec,
     extra: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming map-reduce: yields ``[PROGRESS:...]`` markers through the map
@@ -114,7 +127,7 @@ async def _map_reduce_stream(
 
     if total == 1:
         messages = [{"role": "user", "content": f"{single_chunk_prompt}\n\n{chunks[0]}"}]
-        async for token in stream_llm(messages, app_name, extra=extra):
+        async for token in stream_llm(messages, app_name, spec, extra=extra):
             yield token
         return
 
@@ -123,6 +136,7 @@ async def _map_reduce_stream(
     async for item in map_calls_iter(
         [[{"role": "user", "content": f"{map_prompt}\n\n{chunk}"}] for chunk in chunks],
         app_name,
+        spec,
     ):
         if isinstance(item, list):
             extracted = item
@@ -130,12 +144,12 @@ async def _map_reduce_stream(
             yield f"[PROGRESS:mapped {item}/{total} chunks]\n"
     yield f"[PROGRESS:reducing {total} chunks]\n"
     reduce_messages = [{"role": "user", "content": f"{reduce_prompt}\n\n" + "\n\n".join(extracted)}]
-    async for token in stream_llm(reduce_messages, app_name, extra=extra):
+    async for token in stream_llm(reduce_messages, app_name, spec, extra=extra):
         yield token
 
 
 async def generate_summary(
-    document_text: str, app_name: str, response_format: str = "text"
+    document_text: str, app_name: str, spec: ModelSpec, response_format: str = "text"
 ) -> AsyncGenerator[str, None]:
     """Summarizes a document using map-reduce, streaming the final summary."""
     extra: dict = {}
@@ -147,13 +161,15 @@ async def generate_summary(
         reduce_prompt="Based on these extracted key points from different sections of a document, write a 3-sentence professional summary:",
         single_chunk_prompt="Please provide a 3-sentence professional summary of the following document:",
         app_name=app_name,
+        spec=spec,
         extra=extra,
     ):
         yield piece
 
 
 async def generate_comparison(
-    doc1_text: str, doc2_text: str, file_1: str, file_2: str, app_name: str, response_format: str = "text"
+    doc1_text: str, doc2_text: str, file_1: str, file_2: str, app_name: str, spec: ModelSpec,
+    response_format: str = "text",
 ) -> AsyncGenerator[str, None]:
     """Compares two documents using map-reduce to preserve full context, then
     streams the final comparison. Both documents share one map fan-out so
@@ -188,7 +204,7 @@ async def generate_comparison(
     if jobs:
         total = len(jobs)
         yield f"[PROGRESS:mapping {total} chunks]\n"
-        async for item in map_calls_iter(jobs, app_name):
+        async for item in map_calls_iter(jobs, app_name, spec):
             if isinstance(item, list):
                 extracted = item
             else:
@@ -206,6 +222,7 @@ async def generate_comparison(
                 f"information:\n\n" + "\n\n".join(notes)
             )}],
             app_name,
+            spec,
         )
 
     if jobs:
@@ -224,5 +241,5 @@ async def generate_comparison(
             ),
         }
     ]
-    async for token in stream_llm(compare_messages, app_name, extra=extra):
+    async for token in stream_llm(compare_messages, app_name, spec, extra=extra):
         yield token

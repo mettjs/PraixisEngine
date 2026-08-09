@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, File, Path, Query, UploadFile, Form
-from src.dependencies.security import verify_api_key
+from src.dependencies.security import caller, verify_api_key
 from src.models.schemas import CompareRequest, EmbedRequest, QuestionRequest, SearchRequest, TextUploadRequest
 from src.controllers.rag_controller import (
     handle_rag_upload,
@@ -72,9 +72,10 @@ async def rag_upload_text_endpoint(
 @router.post("/ask", dependencies=[Depends(rate_limit("30/minute"))])
 async def rag_ask_endpoint(
     question_request: QuestionRequest,
-    app_name: str = Depends(verify_api_key)
+    app_name: str = Depends(verify_api_key),
+    caller_entry: dict = Depends(caller),
 ):
-    return await handle_rag_question(question_request, app_name=app_name)
+    return await handle_rag_question(question_request, app_name=app_name, caller_entry=caller_entry)
 
 
 @router.post("/search", dependencies=[Depends(rate_limit("30/minute"))])
@@ -158,13 +159,16 @@ async def rag_delete_file_endpoint(
 @router.post("/knowledge_base/compare", dependencies=[Depends(rate_limit("5/minute"))])
 async def rag_compare_documents(
     compare_request: CompareRequest,
-    app_name: str = Depends(verify_api_key)
+    app_name: str = Depends(verify_api_key),
+    caller_entry: dict = Depends(caller),
 ):
     return await handle_compare_documents(
         collection_name=compare_request.collection_name,
         file_1=compare_request.file_1,
         file_2=compare_request.file_2,
         app_name=app_name,
+        model=compare_request.model,
+        caller_entry=caller_entry,
         stream=compare_request.stream,
         response_format=compare_request.response_format,
     )
@@ -174,11 +178,13 @@ async def rag_compare_documents(
 async def rag_summarize_document(
     collection_name: str,
     filename: str,
+    model: str | None = Query(default=None, pattern=r"^[a-zA-Z0-9_-]{1,63}$", description="Registry id of the LLM to use; omit for this key's default."),
     stream: bool = Query(default=False, description="Stream tokens as text/event-stream, or return one buffered JSON body."),
     response_format: str = Query(default="text", pattern=r"^(text|json)$", description="LLM content format: 'text' or 'json'."),
-    app_name: str = Depends(verify_api_key)
+    app_name: str = Depends(verify_api_key),
+    caller_entry: dict = Depends(caller),
 ):
     return await handle_summarize_document(
         collection_name=collection_name, filename=filename, app_name=app_name,
-        stream=stream, response_format=response_format,
+        model=model, caller_entry=caller_entry, stream=stream, response_format=response_format,
     )

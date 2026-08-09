@@ -36,6 +36,7 @@
           <tr>
             <th class="th">App Name</th>
             <th class="th">Key Preview</th>
+            <th class="th">Models</th>
             <th class="th">Created</th>
             <th class="th text-right">Actions</th>
           </tr>
@@ -52,6 +53,22 @@
                 <code class="text-xs bg-slate-700/50 text-slate-300 px-2 py-0.5 rounded font-mono"
                       x-text="key.key_preview">
                 </code>
+              </td>
+
+              <td class="td">
+                <div class="flex flex-wrap items-center gap-1">
+                  <!-- No allowlist means the key reaches every configured model. -->
+                  <span x-show="!key.models || key.models.length === 0"
+                        class="text-xs text-slate-500">All models</span>
+                  <template x-for="modelId in (key.models || [])" :key="modelId">
+                    <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-700/50 text-slate-300"
+                          x-text="modelId"></span>
+                  </template>
+                  <span x-show="key.default_model"
+                        class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-brand/15 text-brand"
+                        :title="'Used when a request names no model'"
+                        x-text="'default: ' + key.default_model"></span>
+                </div>
               </td>
 
               <td class="td text-slate-400 text-xs" x-text="formatDate(key.created_at)"></td>

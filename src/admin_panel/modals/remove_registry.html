@@ -1,0 +1,51 @@
+<!-- ═══════════════════════════════════════════════════════
+     MODAL: Remove models.yaml (fall back to the env-var model)
+     ═══════════════════════════════════════════════════════ -->
+<div x-show="modal === 'removeRegistry'"
+     x-transition:enter="transition ease-out duration-150"
+     x-transition:enter-start="opacity-0"
+     x-transition:enter-end="opacity-100"
+     @keydown.escape.window="modal = null"
+     @click.self="modal = null"
+     class="modal-overlay">
+
+  <div class="modal-box"
+       x-transition:enter="transition ease-out duration-150"
+       x-transition:enter-start="opacity-0 scale-95"
+       x-transition:enter-end="opacity-100 scale-100"
+       @click.stop>
+
+    <div class="flex items-center justify-between px-6 pt-6 pb-4 border-b border-slate-700">
+      <h3 class="font-semibold text-slate-100">Remove models.yaml?</h3>
+      <button title="Close" aria-label="Close" @click="modal = null" class="text-slate-500 hover:text-slate-300 transition-colors">
+        <svg class="w-5 h-5"><use href="#ic-x"/></svg>
+      </button>
+    </div>
+
+    <div class="px-6 py-5 space-y-3">
+      <p class="text-sm text-slate-300">
+        The deployment falls back to the single model its
+        <code class="text-xs text-slate-400">AI_API_URL</code> /
+        <code class="text-xs text-slate-400">MODEL_NAME</code> env vars describe, under the id
+        <code class="text-xs text-slate-400">default</code>.
+      </p>
+      <div class="flex items-start gap-2.5 bg-amber-500/10 border border-amber-500/25 rounded-lg p-3.5">
+        <svg class="w-4 h-4 text-amber-400 shrink-0 mt-0.5"><use href="#ic-warn"/></svg>
+        <p class="text-sm text-amber-300">
+          Clients naming any other model id will get <strong>400</strong> once the engine restarts,
+          and API keys scoped to those ids stop resolving entirely.
+        </p>
+      </div>
+    </div>
+
+    <div class="px-6 pb-6 flex justify-end gap-3">
+      <button @click="modal = null" class="btn-ghost">Cancel</button>
+      <button @click="removeRegistry()" class="btn bg-red-500 hover:bg-red-600 text-white" :disabled="modalLoading">
+        <span x-show="modalLoading" class="spinner"></span>
+        <svg x-show="!modalLoading" class="w-4 h-4"><use href="#ic-trash"/></svg>
+        Remove file
+      </button>
+    </div>
+
+  </div>
+</div>

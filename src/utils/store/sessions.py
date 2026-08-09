@@ -11,6 +11,38 @@ def _get_redis_key(app_name: str, session_id: str) -> str:
     return f"chat:{app_name}:{session_id}"
 
 
+def _model_key(app_name: str, session_id: str) -> str:
+    """Sidecar key holding the model a session is bound to.
+
+    A sidecar rather than a field inside the history: the history is a bare
+    JSON list on the wire, and wrapping it in an envelope would mean migrating
+    every live session. This keeps the format untouched and expires with it.
+    """
+    return f"session:{app_name}:{session_id}:model"
+
+
+async def get_session_model(app_name: str, session_id: str) -> str | None:
+    """The model this session is bound to, or None if it has never been set."""
+    value = await redis_client.get(_model_key(app_name, session_id))
+    return value if isinstance(value, str) else None
+
+
+async def bind_session_model(app_name: str, session_id: str, model_id: str) -> None:
+    """Binds (or rebinds) a session to a model, TTL-matched to the session."""
+    await redis_client.setex(_model_key(app_name, session_id), _SESSION_TTL, model_id)
+
+
+async def touch_session_model(app_name: str, session_id: str) -> None:
+    """Refreshes an existing binding's TTL without changing what it points at.
+
+    Every turn must do one of this or :func:`bind_session_model`, or a long
+    conversation that named its model once would keep the history alive through
+    ``persist_history`` while the binding quietly expired underneath it — and
+    the session would fall back to the default mid-conversation.
+    """
+    await redis_client.expire(_model_key(app_name, session_id), _SESSION_TTL)
+
+
 async def get_or_create_session(
     app_name: str,
     session_id: str | None = None,
@@ -73,6 +105,7 @@ async def delete_session(app_name: str, session_id: str) -> bool:
     redis_key = _get_redis_key(app_name, session_id)
     deleted = await redis_client.delete(redis_key) > 0  # type: ignore[operator]
     if deleted:
+        await redis_client.delete(_model_key(app_name, session_id))
         await delete_session_usage(app_name=app_name, session_id=session_id)
     return deleted
 
@@ -90,8 +123,13 @@ async def delete_all_app_sessions(app_name: str) -> int:
     """Deletes all sessions for the given app (and their per-session usage
     counters). Returns the count of deleted session keys."""
     keys = [key async for key in redis_client.scan_iter(f"chat:{app_name}:*")]
-    if not keys:
-        return 0
-    count = int(await redis_client.delete(*keys))  # type: ignore[arg-type]
+    count = int(await redis_client.delete(*keys)) if keys else 0  # type: ignore[arg-type]
+    # Not conditional on `keys`: a history can expire while its model binding
+    # (written later in its own turn) still has TTL left, so an app with no
+    # sessions can still have bindings to clear. Returning early here left them
+    # behind for up to SESSION_TTL after a wipe reported success.
+    bindings = [key async for key in redis_client.scan_iter(f"session:{app_name}:*:model")]
+    if bindings:
+        await redis_client.delete(*bindings)  # type: ignore[arg-type]
     await delete_all_session_usage(app_name)
     return count

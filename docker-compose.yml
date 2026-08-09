@@ -6,6 +6,15 @@ services:
     env_file: .env
     volumes:
       - ./logs:/app/logs
+      # Multi-model registry (optional). Uncomment once you have a models.yaml —
+      # left commented because Docker silently creates an EMPTY DIRECTORY at the
+      # source path when the file does not exist, and every single-model
+      # deployment would grow a stray ./models.yaml/ directory for nothing.
+      #
+      # Writable, not :ro — the admin panel's Models view edits this file. Make
+      # it :ro if you'd rather the registry only ever change through deploys;
+      # the panel then reports the save failure instead of pretending it worked.
+      # - ./models.yaml:/app/models.yaml
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/system/ping', timeout=3)"]
