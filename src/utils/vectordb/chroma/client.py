@@ -109,6 +109,19 @@ def get_owned_collection(collection_name: str, app_name: str) -> chromadb.Collec
     return collection
 
 
+def drop_collection(collection_name: str, app_name: str) -> None:
+    """Removes an app's collection along with the question index that shares its
+    lifecycle.
+
+    Callers must have verified ownership first — this does not re-check. The
+    question index is skipped when absent (or not owned, which
+    ``get_questions_collection`` reports as absent).
+    """
+    get_client().delete_collection(name=scoped_name(app_name, collection_name))
+    if get_questions_collection(collection_name, app_name) is not None:
+        get_client().delete_collection(name=questions_name(app_name, collection_name))
+
+
 def get_questions_collection(collection_name: str, app_name: str) -> chromadb.Collection | None:
     """The parallel question index, or None when it was never created."""
     try:

@@ -4,7 +4,7 @@ wiping, audit log, and the vector-DB admin surface."""
 import datetime
 import uuid
 
-from conftest import ADMIN_AUTH
+from conftest import ADMIN_AUTH, VECTOR_BACKEND
 from src.utils.store.api_keys import hash_api_key
 
 
@@ -194,7 +194,9 @@ def test_vector_admin_surface(client, headers):
         params={"app_name": "testapp", "collection_name": collection, "query": "vacation"},
         auth=ADMIN_AUTH,
     ).json()
-    assert search["score_type"] == "similarity"
+    # Backend-dependent, same as the client-facing search endpoint: pgvector
+    # reports RRF from its hybrid dense+FTS fusion, chroma raw similarity.
+    assert search["score_type"] == ("rrf" if VECTOR_BACKEND == "pgvector" else "similarity")
     assert search["results"]
 
     deleted = client.delete(
@@ -209,9 +211,16 @@ def test_vector_admin_surface(client, headers):
         auth=ADMIN_AUTH,
     ).status_code == 404
 
-    assert client.delete(
-        f"/api/system/vector/collections/testapp/{collection}", auth=ADMIN_AUTH
-    ).status_code == 200
+    # Removing the last file removes the collection with it, on BOTH backends: a
+    # collection exists exactly as long as it holds chunks. pgvector derives
+    # collections from `chunks` rows; chroma drops the emptied collection to
+    # match (see chroma/collections.py::delete_file_from_collection). So it is
+    # already gone here, and is absent from listings too.
+    listing_after = client.get("/api/system/vector/collections", auth=ADMIN_AUTH).json()
+    assert not any(
+        c["app_name"] == "testapp" and c["collection_name"] == collection
+        for c in listing_after["collections"]
+    )
     assert client.delete(
         f"/api/system/vector/collections/testapp/{collection}", auth=ADMIN_AUTH
     ).status_code == 404

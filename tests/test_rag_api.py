@@ -1,10 +1,13 @@
-"""RAG endpoints (/rag-db/*) through the full app against embedded Chroma:
-ingestion (multipart + raw text), inspection, search, ask (markers + SOURCES
-escaping), the hypothetical-question index, summaries, compare, deletion."""
+"""RAG endpoints (/rag-db/*) through the full app against the active vector
+backend (chroma by default, pgvector when VECTOR_BACKEND says so): ingestion
+(multipart + raw text), inspection, search, ask (markers + SOURCES escaping),
+the hypothetical-question index, summaries, compare, deletion."""
 import time
 import uuid
 
-from conftest import DEFAULT_REPLY, EMBEDDING_DIMS
+import pytest
+
+from conftest import DEFAULT_REPLY, EMBEDDING_DIMS, VECTOR_BACKEND
 
 _LONG_TEXT = (
     "Employees accrue two vacation days per month of service. "
@@ -108,7 +111,12 @@ def test_search_returns_scored_chunks(client, headers):
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["score_type"] == "similarity"  # chroma backend: no hybrid FTS arm
+    # pgvector fuses a dense arm with an FTS arm and reports RRF; chroma is
+    # pure vector search and reports raw similarity. The endpoint advertises
+    # which, so the assertion follows the backend under test rather than
+    # pinning one of them.
+    expected_score_type = "rrf" if VECTOR_BACKEND == "pgvector" else "similarity"
+    assert body["score_type"] == expected_score_type
     assert body["results"], "seeded collection must return hits"
     for hit in body["results"]:
         assert hit["source"] == "handbook.txt"
@@ -276,6 +284,63 @@ def test_compare_documents_buffered(client, headers, fake_llm):
 
 
 # ── Deletion ──────────────────────────────────────────────────────────────────
+
+@pytest.mark.skipif(
+    VECTOR_BACKEND != "chroma",
+    reason="chroma-specific rollback: pgvector inserts no rows on failure, so no "
+           "collection comes into existence in the first place",
+)
+def test_failed_ingestion_leaves_no_empty_collection(client, headers, monkeypatch):
+    """A failed insert must not strand the collection it just created.
+
+    Chroma's get_or_create_collection creates the collection before any chunk
+    is written, so an insert that raises would otherwise leave an empty
+    collection behind — visible in listings, deletable with a 200 — breaking
+    the same invariant the deletion path maintains.
+    """
+    import chromadb.api.models.Collection as _chroma_collection
+
+    collection = _collection()
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("simulated chroma write failure")
+
+    monkeypatch.setattr(_chroma_collection.Collection, "add", _boom)
+    response = client.post(
+        "/rag-db/upload_text",
+        json={"text": "Vacation policy: two days per month.", "filename": "doomed.txt",
+              "collection_name": collection, "chunking_strategy": "character"},
+        headers=headers,
+    )
+    assert response.status_code >= 400, "the simulated write failure must surface"
+    monkeypatch.undo()
+
+    listed = client.get("/rag-db/list", headers=headers).json()["active_collections"]
+    assert collection not in listed, "a failed upload must not leave an empty collection"
+    assert client.delete(f"/rag-db/delete/{collection}", headers=headers).status_code == 404
+
+
+def test_deleting_last_file_removes_the_collection(client, headers):
+    """A collection exists exactly as long as it holds chunks.
+
+    Identical on both backends: pgvector derives collections from `chunks`
+    rows, and chroma drops the emptied collection to match. There is no
+    create-collection endpoint, so an empty collection is not a state the API
+    can represent.
+    """
+    collection = _collection()
+    _upload_text(client, headers, collection, filename="only.txt")
+    listed = client.get("/rag-db/list", headers=headers).json()["active_collections"]
+    assert collection in listed
+
+    assert client.delete(
+        f"/rag-db/{collection}/files/only.txt", headers=headers
+    ).status_code == 200
+
+    listed = client.get("/rag-db/list", headers=headers).json()["active_collections"]
+    assert collection not in listed, "emptying a collection must remove it"
+    assert client.delete(f"/rag-db/delete/{collection}", headers=headers).status_code == 404
+
 
 def test_delete_file_then_collection(client, headers):
     collection = _collection()

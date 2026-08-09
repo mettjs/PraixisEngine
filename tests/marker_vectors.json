@@ -1,0 +1,242 @@
+{
+  "_comment": [
+    "GOLDEN MARKER VECTORS — shared contract between PraixisEngine and every SDK.",
+    "",
+    "The engine emits control markers as standalone [KEY:value] lines ahead of LLM",
+    "tokens, and percent-escapes items inside the comma-separated [SOURCES:...]",
+    "value. That escape table and marker whitelist are implemented five times over:",
+    "once in the engine (src/utils/system/streaming.py) and once in each SDK",
+    "decoder. Nothing but discipline kept them in step, so a change landing in one",
+    "repo and not the others corrupted filenames or swallowed tokens silently.",
+    "",
+    "This file is the arbiter. It is authored in PraixisEngine and VENDORED",
+    "verbatim into each SDK; every repo's normal unit tests read it and assert",
+    "against their own decoder, so drift fails an ordinary offline test in",
+    "whichever repo drifted. Edit it in the engine, then copy it outward — never",
+    "the reverse, and never edit a vendored copy in place.",
+    "",
+    "Assertions are behavioural, not structural, so the same file works against a",
+    "Python event assembler, a JS async generator and a Go bufio reader alike."
+  ],
+  "version": 1,
+  "canonical_source": "PraixisEngine/tests/marker_vectors.json",
+  "marker_keys": [
+    "SESSION_ID",
+    "SEARCH_QUERY",
+    "SOURCES",
+    "FILE",
+    "PROGRESS",
+    "ERROR"
+  ],
+  "non_marker_keys": [
+    "NOTE",
+    "WARNING",
+    "CITATION",
+    "TOOL",
+    "SESSION"
+  ],
+  "source_escaping": [
+    {
+      "name": "plain",
+      "decoded": [
+        "report.pdf"
+      ],
+      "encoded": "report.pdf"
+    },
+    {
+      "name": "multiple items",
+      "decoded": [
+        "a.txt",
+        "b.txt",
+        "c.txt"
+      ],
+      "encoded": "a.txt,b.txt,c.txt"
+    },
+    {
+      "name": "comma in name",
+      "decoded": [
+        "Q3, Final.pdf"
+      ],
+      "encoded": "Q3%2C Final.pdf"
+    },
+    {
+      "name": "percent in name",
+      "decoded": [
+        "50% off.txt"
+      ],
+      "encoded": "50%25 off.txt"
+    },
+    {
+      "name": "closing bracket",
+      "decoded": [
+        "notes].txt"
+      ],
+      "encoded": "notes%5D.txt"
+    },
+    {
+      "name": "newline in name",
+      "decoded": [
+        "line1\nline2.txt"
+      ],
+      "encoded": "line1%0Aline2.txt"
+    },
+    {
+      "name": "carriage return",
+      "decoded": [
+        "line1\rline2.txt"
+      ],
+      "encoded": "line1%0Dline2.txt"
+    },
+    {
+      "name": "crlf in name",
+      "decoded": [
+        "a\r\nb.txt"
+      ],
+      "encoded": "a%0D%0Ab.txt"
+    },
+    {
+      "name": "literal %2C (must not decode to a comma)",
+      "decoded": [
+        "already%2Cescaped.txt"
+      ],
+      "encoded": "already%252Cescaped.txt"
+    },
+    {
+      "name": "literal %25",
+      "decoded": [
+        "%25.txt"
+      ],
+      "encoded": "%2525.txt"
+    },
+    {
+      "name": "literal %5D",
+      "decoded": [
+        "%5D.txt"
+      ],
+      "encoded": "%255D.txt"
+    },
+    {
+      "name": "double-encoded bait",
+      "decoded": [
+        "%252C.txt"
+      ],
+      "encoded": "%25252C.txt"
+    },
+    {
+      "name": "every special char",
+      "decoded": [
+        "%,]\n\r.txt"
+      ],
+      "encoded": "%25%2C%5D%0A%0D.txt"
+    },
+    {
+      "name": "specials across items",
+      "decoded": [
+        "a,b.txt",
+        "c%d.txt",
+        "e]f.txt"
+      ],
+      "encoded": "a%2Cb.txt,c%25d.txt,e%5Df.txt"
+    },
+    {
+      "name": "empty list",
+      "decoded": [],
+      "encoded": ""
+    },
+    {
+      "name": "unicode",
+      "decoded": [
+        "résumé — 2026.pdf"
+      ],
+      "encoded": "résumé — 2026.pdf"
+    }
+  ],
+  "streams": [
+    {
+      "name": "chat: session marker then tokens",
+      "chunks": [
+        "[SESSION_ID:sess-1]\n",
+        "Hello ",
+        "world"
+      ],
+      "meta": {
+        "SESSION_ID": "sess-1"
+      },
+      "sources": null,
+      "content": "Hello world"
+    },
+    {
+      "name": "rag: all three leading markers",
+      "chunks": [
+        "[SESSION_ID:sess-2]\n[SEARCH_QUERY:vacation days]\n[SOURCES:handbook.txt,policy.pdf]\n",
+        "You get two days."
+      ],
+      "meta": {
+        "SESSION_ID": "sess-2",
+        "SEARCH_QUERY": "vacation days"
+      },
+      "sources": [
+        "handbook.txt",
+        "policy.pdf"
+      ],
+      "content": "You get two days."
+    },
+    {
+      "name": "marker split across a chunk boundary",
+      "chunks": [
+        "[SESS",
+        "ION_ID:sess-3]\n",
+        "hi"
+      ],
+      "meta": {
+        "SESSION_ID": "sess-3"
+      },
+      "sources": null,
+      "content": "hi"
+    },
+    {
+      "name": "marker split mid-value",
+      "chunks": [
+        "[SOURCES:Q3%2C Fin",
+        "al.pdf,50%25 off%5D.txt]\n",
+        "ok"
+      ],
+      "meta": {},
+      "sources": [
+        "Q3, Final.pdf",
+        "50% off].txt"
+      ],
+      "content": "ok"
+    },
+    {
+      "name": "non-whitelisted key stays content",
+      "chunks": [
+        "[NOTE:keep me]\nrest"
+      ],
+      "meta": {},
+      "sources": null,
+      "content": "[NOTE:keep me]\nrest"
+    },
+    {
+      "name": "file marker",
+      "chunks": [
+        "[FILE:report.pdf]\n",
+        "summary text"
+      ],
+      "meta": {
+        "FILE": "report.pdf"
+      },
+      "sources": null,
+      "content": "summary text"
+    },
+    {
+      "name": "no markers at all",
+      "chunks": [
+        "just tokens"
+      ],
+      "meta": {},
+      "sources": null,
+      "content": "just tokens"
+    }
+  ]
+}

@@ -27,8 +27,35 @@ dependencies = [
 dev = [
     "fakeredis>=2.36.2",
     "pytest>=9.1.1",
+    # Pinned exactly, not floored: a new ruff release enabling a rule by default
+    # would otherwise turn CI red on code nobody touched. Bump deliberately.
+    "ruff==0.16.2",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py313"
+extend-exclude = ["src/admin_panel/static"]
+
+[tool.ruff.lint]
+# Deliberately minimal: the rules that catch real defects — undefined names,
+# unused imports and variables, f-string mistakes, syntax/runtime errors. The
+# codebase passes these with no changes, so CI is meaningful from day one
+# instead of starting red or starting with a wall of suppressions.
+#
+# Intentionally NOT enabled, each because it fights a deliberate idiom here:
+#   B904  — controllers raise HTTPException inside `except` without `from e`
+#           on purpose; internal causes are logged, not chained into responses.
+#   BLE001/S110 — usage tracking, history persistence and audit writes swallow
+#           broadly by design so they can never break the request they observe.
+#   B008  — `Depends(...)`/`Query(...)` in defaults is the FastAPI idiom.
+# Widening this list is a separate, deliberate change with its own diff.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# conftest fakes external systems before importing src, so imports cannot all
+# sit at the top of the file.
+"tests/conftest.py" = ["E402"]

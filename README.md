@@ -544,7 +544,7 @@ Response:
 | `GET` | `/rag-db/{collection}/files/{filename}/questions` | Question-index status for a document: `total_chunks`, `questions_stored`, and `generation_pending` (true while a background pass is running) |
 | `POST` | `/rag-db/{collection}/files/{filename}/questions` | Backfill or rebuild the hypothetical-question index for an already-stored document — `improved_search` is no longer locked in at upload time. Regenerates in the background and swaps out the old questions only once the new pass has results, so a failed pass never strips a working index (poll the `GET` for progress). `409` while a pass is already running, `400` when `HQ_ENABLED=false` |
 | `DELETE` | `/rag-db/delete/{collection}` | Delete an entire collection |
-| `DELETE` | `/rag-db/{collection}/files/{filename}` | Delete a single document from a collection |
+| `DELETE` | `/rag-db/{collection}/files/{filename}` | Delete a single document from a collection. Deleting the **last** document also deletes the collection — a collection exists exactly as long as it holds chunks |
 | `GET` | `/rag-db/knowledge_base/{collection}/files/{filename}/summary` | 3-sentence summary of a document. Returns `{"filename", "content"}` by default; pass `?stream=true` for a token stream (`[FILE:...]` header, then `[PROGRESS:...]` lines, then tokens). Also accepts `?response_format=json` |
 | `POST` | `/rag-db/knowledge_base/compare` | Bullet-point diff between two documents (JSON body: `collection_name`, `file_1`, `file_2`, optional `stream` and `response_format`). Returns `{"file_1", "file_2", "content"}` by default; with `"stream": true`, streams `[PROGRESS:...]` lines then tokens |
 
@@ -579,7 +579,7 @@ All admin endpoints require HTTP Basic Auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD`
 | `GET` | `/api/system/vector/collections` | List all vector collections across all apps |
 | `GET` | `/api/system/vector/collections/{app_name}/{collection_name}/files` | List files in a collection |
 | `DELETE` | `/api/system/vector/collections/{app_name}/{collection_name}` | Delete an entire collection |
-| `DELETE` | `/api/system/vector/collections/{app_name}/{collection_name}/files` | Delete a specific file from a collection (query param: `filename`) |
+| `DELETE` | `/api/system/vector/collections/{app_name}/{collection_name}/files` | Delete a specific file from a collection (query param: `filename`). Deleting the last file also deletes the collection |
 
 ---
 

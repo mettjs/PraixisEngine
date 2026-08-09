@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch supersedes the run in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # pyproject.toml requires >=3.13; the Dockerfile ships 3.13-slim.
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  test:
+    name: test (${{ matrix.vector_backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # Both backends report independently — a pgvector regression should not
+      # hide whether chroma still works, and vice versa.
+      fail-fast: false
+      matrix:
+        # pgvector is the production default (src/config.py), chroma is the
+        # no-extra-database option. Both are supported, so both are tested.
+        vector_backend: [chroma, pgvector]
+
+    services:
+      # Service containers are job-scoped, so this starts for the chroma leg
+      # too. That costs an image pull in parallel with checkout and nothing
+      # else; the alternative is duplicating the whole job definition.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: praixis
+          POSTGRES_PASSWORD: praixis
+          POSTGRES_DB: praixis
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U praixis -d praixis"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --frozen fails if uv.lock disagrees with pyproject.toml, so a
+      # hand-edited dependency that was never locked cannot reach main.
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # conftest swaps Redis for fakeredis, the LLM for an in-process fake and
+      # embeddings for a deterministic hash embedder, all before src is
+      # imported — so no network and no model download. The vector store is the
+      # only real dependency: embedded Chroma on a temp dir, or the pgvector
+      # service above. init_db creates its extensions and schema idempotently,
+      # so the pgvector leg needs no migration or fixture step.
+      - name: Run tests
+        env:
+          VECTOR_BACKEND: ${{ matrix.vector_backend }}
+          POSTGRES_URL: postgresql://praixis:praixis@localhost:5432/praixis
+        run: uv run pytest -q
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Rules are pinned in pyproject.toml ([tool.ruff.lint] select) and ruff
+      # itself is pinned in the dev group, so this job only ever goes red
+      # because of a code change in this repo.
+      #
+      # `ruff format` is deliberately NOT run: it would reformat 46 of 51 files,
+      # which is a separate decision with its own diff, not a CI gate.
+      - name: Ruff
+        run: uv run ruff check --output-format=github .

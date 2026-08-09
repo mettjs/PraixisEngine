@@ -3,6 +3,7 @@ import uuid
 
 from src.utils.vectordb.base import StaleChunksError
 from src.utils.vectordb.chroma.client import (
+    drop_collection,
     ensure_name_fits,
     get_client,
     get_owned_collection,
@@ -58,7 +59,21 @@ async def add_file_to_rag_db(
         ]
 
         # Add new chunks first — if this fails, old data is still intact.
-        collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
+        # get_or_create above may have just created this collection, though, and
+        # a failed insert would strand it empty. That breaks the invariant the
+        # deletion path maintains — a collection exists exactly as long as it
+        # holds chunks — which pgvector gets for free (no rows inserted, no
+        # collection). Ownership was verified above and the collection holds
+        # nothing, so rolling it back can only drop something this app owns and
+        # that no one can retrieve from. A replace (old_ids non-empty) leaves
+        # count > 0, so an existing collection is never dropped here.
+        was_empty = collection.count() == 0
+        try:
+            collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
+        except Exception:
+            if was_empty:
+                drop_collection(collection_name, app_name)
+            raise
         if old_ids:
             collection.delete(ids=old_ids)
 

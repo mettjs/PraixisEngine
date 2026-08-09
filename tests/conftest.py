@@ -15,10 +15,15 @@ BEFORE any ``src`` module binds its module-level clients:
   no fastembed inference. Vectors are stable per text, which is all the
   chunking / retrieval code paths need.
 
-The vector backend is real embedded Chroma on a temp directory — the same
-code the ``VECTOR_BACKEND=chroma`` production configuration runs.
+The vector backend is real — not faked. It defaults to embedded Chroma on a
+temp directory, so a bare ``uv run pytest`` needs no services. Set
+``VECTOR_BACKEND=pgvector`` (plus ``POSTGRES_URL``) to run the identical suite
+against a real Postgres + pgvector instead; CI does this as a matrix leg, since
+pgvector is the production default. ``init_db`` creates its extensions and
+schema idempotently, so the database needs no fixtures — only to exist.
 
 Run with: ``uv run pytest``
+       or: ``VECTOR_BACKEND=pgvector uv run pytest``
 """
 import hashlib
 import os
@@ -34,9 +39,24 @@ import pytest
 
 _CHROMA_TMP = tempfile.mkdtemp(prefix="praixis-test-chroma-")
 
+# Which backend the suite exercises. Read from the ambient environment so CI can
+# switch legs without editing this file; chroma stays the default so local runs
+# stay service-free.
+VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "chroma").strip().lower()
+
+# FakeEmbedder (section 4) emits one float per SHA-256 byte. pgvector's init_db
+# validates the model's real output width against EMBEDDING_DIMS and refuses to
+# build the schema on a mismatch, so the two must agree here — the app's default
+# of 384 would abort the pgvector leg before a single test ran.
+EMBEDDING_DIMS = 32
+
 os.environ.update({
-    "VECTOR_BACKEND": "chroma",
+    "VECTOR_BACKEND": VECTOR_BACKEND,
     "CHROMA_PATH": _CHROMA_TMP,
+    "POSTGRES_URL": os.getenv(
+        "POSTGRES_URL", "postgresql://praixis:praixis@localhost:5432/praixis"
+    ),
+    "EMBEDDING_DIMS": str(EMBEDDING_DIMS),
     "REDIS_URL": "redis://fake-redis.invalid:6379/0",  # intercepted below
     "AI_API_URL": "http://fake-llm.invalid",
     "AI_API_KEY": "test-key",
@@ -146,8 +166,7 @@ import src.utils.ai_client as _ai_client  # noqa: E402
 _ai_client._client = FAKE_LLM  # type: ignore[assignment]
 
 # ── 4. Embeddings → deterministic hash vectors (no model download).
-
-EMBEDDING_DIMS = 32
+# Width is EMBEDDING_DIMS, declared above because the env block needs it.
 
 
 class FakeEmbedder:
@@ -166,7 +185,7 @@ _embeddings._embedder = FakeEmbedder()  # type: ignore[assignment]
 
 @pytest.fixture(scope="session")
 def client():
-    """App under test, lifespan run (GPU pools filled, Chroma initialized)."""
+    """App under test, lifespan run (GPU pools filled, vector store initialized)."""
     from fastapi.testclient import TestClient
     from main import app
 
@@ -192,6 +211,21 @@ def api_key(client) -> str:
 @pytest.fixture()
 def headers(api_key) -> dict:
     return {"X-API-Key": api_key}
+
+
+@pytest.fixture(scope="session")
+def marker_vectors() -> dict:
+    """The golden marker/escaping contract shared with the three SDKs.
+
+    Authored here and vendored verbatim into praixis-python, praixis-node and
+    praixis-go, where the same vectors are asserted against each SDK's own
+    decoder. See the ``_comment`` block inside the file.
+    """
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "marker_vectors.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @pytest.fixture()

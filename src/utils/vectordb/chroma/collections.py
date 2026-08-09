@@ -2,11 +2,10 @@ import asyncio
 from typing import Any, Set
 
 from src.utils.vectordb.chroma.client import (
+    drop_collection,
     get_client,
     get_owned_collection,
     get_questions_collection,
-    questions_name,
-    scoped_name,
 )
 
 
@@ -84,10 +83,7 @@ async def delete_collection(collection_name: str, app_name: str) -> bool:
             get_owned_collection(collection_name, app_name)
         except ValueError:
             return False
-        get_client().delete_collection(name=scoped_name(app_name, collection_name))
-        # The question index shares the collection's lifecycle.
-        if get_questions_collection(collection_name, app_name) is not None:
-            get_client().delete_collection(name=questions_name(app_name, collection_name))
+        drop_collection(collection_name, app_name)
         return True
 
     return await asyncio.to_thread(_run)
@@ -130,6 +126,17 @@ async def delete_file_from_collection(collection_name: str, filename: str, app_n
         questions = get_questions_collection(collection_name, app_name)
         if questions is not None:
             questions.delete(where={"source": filename})
+
+        # A collection exists exactly as long as it holds chunks. pgvector gets
+        # that rule for free by deriving collections from `chunks` rows; chroma
+        # collections are first-class objects that would otherwise outlive their
+        # contents, leaving an empty collection that still answers 200 to a
+        # delete and still appears in listings. Since there is no
+        # create-collection endpoint — a collection only ever comes into being
+        # as a side effect of an upload — an empty one is not a thing the API
+        # can represent, so drop it here and keep both backends identical.
+        if collection.count() == 0:
+            drop_collection(collection_name, app_name)
         return True
 
     return await asyncio.to_thread(_run)

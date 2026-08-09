@@ -207,3 +207,46 @@ def test_new_api_key_prefix_and_uniqueness():
 def test_hash_api_key_is_sha256_hex():
     key = "praixis_example"
     assert hash_api_key(key) == hashlib.sha256(key.encode()).hexdigest()
+
+
+# ── Golden marker vectors ─────────────────────────────────────────────────────
+# tests/marker_vectors.json is the shared contract with the three SDKs; see the
+# _comment block inside it. These tests hold the ENGINE side: the whitelist and
+# the [SOURCES:...] escape table. Each SDK vendors the same file and asserts the
+# same behaviour against its own decoder, so a change made here without copying
+# the file outward fails an ordinary test over there.
+
+def test_marker_vectors_whitelist(marker_vectors):
+    """Every whitelisted key parses as a marker; nothing else does."""
+    for key in marker_vectors["marker_keys"]:
+        assert parse_marker(f"[{key}:value]\n") == (key, "value"), key
+
+    for key in marker_vectors["non_marker_keys"]:
+        assert parse_marker(f"[{key}:value]\n") is None, (
+            f"'{key}' must stay LLM content — widening the whitelist silently "
+            f"swallows tokens that merely look like markers"
+        )
+
+
+def test_marker_vectors_whitelist_matches_implementation(marker_vectors):
+    """The vectors enumerate exactly the keys the engine emits.
+
+    Adding a marker means updating this file and re-vendoring it to all three
+    SDKs; this assertion is what makes forgetting that impossible to miss.
+    """
+    assert list(MARKER_KEYS) == marker_vectors["marker_keys"]
+
+
+def test_marker_vectors_source_escaping(marker_vectors):
+    """Encode and decode both match the contract, for every vector."""
+    for case in marker_vectors["source_escaping"]:
+        decoded, encoded = case["decoded"], case["encoded"]
+        assert encode_source_list(decoded) == encoded, case["name"]
+        assert decode_source_list(encoded) == decoded, case["name"]
+
+
+def test_marker_vectors_source_escaping_round_trips(marker_vectors):
+    """decode(encode(x)) == x — the property the table exists to guarantee."""
+    for case in marker_vectors["source_escaping"]:
+        decoded = case["decoded"]
+        assert decode_source_list(encode_source_list(decoded)) == decoded, case["name"]
