@@ -16,6 +16,7 @@
     "the reverse, and never edit a vendored copy in place.",
     "",
     "Assertions are behavioural, not structural, so the same file works against a",
+    "Marker VALUES are raw except inside [SOURCES:...]: a ] may appear unescaped in [SEARCH_QUERY:...] and [FILE:...], so a decoder must read to the LAST ] on the line, not the first. The vectors below pin that.",
     "Python event assembler, a JS async generator and a Go bufio reader alike."
   ],
   "version": 1,
@@ -211,6 +212,35 @@
         "handbook.txt"
       ],
       "content": "You get two days."
+    },
+    {
+      "name": "rag: unescaped ] inside the search query value",
+      "chunks": [
+        "[SESSION_ID:sess-7]\n[MODEL:fast]\n[SEARCH_QUERY:what is [the pool] here?]\n[SOURCES:handbook.txt]\n",
+        "It is gpu:slots."
+      ],
+      "meta": {
+        "SESSION_ID": "sess-7",
+        "MODEL": "fast",
+        "SEARCH_QUERY": "what is [the pool] here?"
+      },
+      "sources": [
+        "handbook.txt"
+      ],
+      "content": "It is gpu:slots."
+    },
+    {
+      "name": "summary: unescaped ] inside the file marker value",
+      "chunks": [
+        "[FILE:notes [draft].txt]\n[MODEL:smart]\n",
+        "Three sentences."
+      ],
+      "meta": {
+        "FILE": "notes [draft].txt",
+        "MODEL": "smart"
+      },
+      "sources": null,
+      "content": "Three sentences."
     },
     {
       "name": "summary: model marker follows the file marker",

@@ -299,10 +299,18 @@ async def save_model_registry(raw: dict | None) -> dict:
     await log_event("MODELS_UPDATED", {"models": [m.get("id") for m in (raw or {}).get("models", [])]})
     logger.info("Model registry file updated; restart required for it to take effect.")
     state = await asyncio.to_thread(registry_file_state)
+    # ``raw is None`` is the DELETE path — saying "Saved" there would describe
+    # the opposite of what happened to anyone reading the response directly.
+    detail = (
+        "models.yaml removed. Restart the engine to fall back to the single model "
+        "its env vars describe."
+        if raw is None
+        else "Saved. Restart the engine for the new registry to take effect."
+    )
     return {
         "status": "success",
         "restart_required": not state["matches_running"],
-        "detail": "Saved. Restart the engine for the new registry to take effect.",
+        "detail": detail,
     }
 
 

@@ -29,7 +29,6 @@ roles:
 # `none` is reserved: it means the model takes no local slot at all.
 pools:
   big: 1
-  small: 4
 
 models:
   # Minimal entry: served by AI_API_URL with the global CONTEXT_WINDOW.

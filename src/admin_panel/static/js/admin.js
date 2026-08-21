@@ -216,8 +216,8 @@ function adminApp() {
       const url = query ? path + '?' + query : path;
       const init = { method, headers: { Authorization: 'Basic ' + this.authHeader } };
       if (jsonBody !== undefined) {
-        // `null` is a meaningful body here (it deletes models.yaml), so the
-        // guard is on the argument being passed at all, not on its value.
+        // Guarded on the argument being passed at all rather than on its value,
+        // so a caller can still send a literal `null` body deliberately.
         init.headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(jsonBody);
       }

@@ -98,7 +98,7 @@ Client App (with X-API-Key)
 2. Client sends `POST /rag-db/ask` with a question, `collection_name`, and optional `n_results`
 3. If a prior session exists, the question is **reformulated** into a standalone query using chat history
 4. Candidates are retrieved over the source text (hybrid dense + keyword on pgvector; dense on Chroma) and — when a question index exists — by dense search over the generated questions (de-duplicated to the parent chunk); the ranked lists are fused with Reciprocal Rank Fusion, then the top-N are window-expanded and injected as context
-5. Response is streamed back: metadata headers (`SESSION_ID`, `SEARCH_QUERY`, `SOURCES`) first, then answer tokens; full answer is saved to the session
+5. Response is streamed back: metadata headers (`SESSION_ID`, `MODEL`, `SEARCH_QUERY`, `SOURCES`) first, then answer tokens; full answer is saved to the session
 
 ### Large Document Pipeline (Map-Reduce)
 
@@ -404,10 +404,10 @@ curl -X POST "http://localhost:8080/general-requests/chat" \
 | `stream` | `true` | `true` — stream tokens as `text/event-stream`; `false` — return one buffered JSON body |
 | `response_format` | `"text"` | `"text"` or `"json"` — instructs the LLM to return structured JSON |
 
-By default returns a streaming response. The first line is always `[SESSION_ID:<id>]` — save this to continue the conversation. With `stream=false` the same reply arrives as one JSON body:
+By default returns a streaming response, leading with `[SESSION_ID:<id>]` — save this to continue the conversation — then `[MODEL:<id>]` naming the model that answered. With `stream=false` the same reply arrives as one JSON body:
 
 ```json
-{"session_id": "a1b2c3d4e5f6...", "content": "The full reply..."}
+{"session_id": "a1b2c3d4e5f6...", "model": "smart", "content": "The full reply..."}
 ```
 
 ---
@@ -424,10 +424,10 @@ Multipart form upload. Fields:
 | `stream` | `true` | `true` — stream tokens as `text/event-stream`; `false` — return one buffered JSON body |
 | `response_format` | `"text"` | `"text"` or `"json"` — instructs the LLM to return structured JSON (applied to the final synthesis only) |
 
-When streaming, the first line is `[FILE:<filename>]`, then for multi-chunk documents `[PROGRESS:mapping N chunks]`, a `[PROGRESS:mapped k/N chunks]` tick as each chunk completes, and `[PROGRESS:reducing N chunks]`, followed by the result tokens. With `stream=false` the same result arrives as a single JSON body (progress markers are dropped):
+When streaming, the first line is `[FILE:<filename>]`, then `[MODEL:<id>]`, then for multi-chunk documents `[PROGRESS:mapping N chunks]`, a `[PROGRESS:mapped k/N chunks]` tick as each chunk completes, and `[PROGRESS:reducing N chunks]`, followed by the result tokens. With `stream=false` the same result arrives as a single JSON body (progress markers are dropped):
 
 ```json
-{"filename": "report.pdf", "content": "The document outlines..."}
+{"filename": "report.pdf", "model": "fast", "content": "The document outlines..."}
 ```
 
 Returns `413 Request Entity Too Large` if the file exceeds 20 MB. The format is detected from the filename extension, falling back to the part's `Content-Type` header, then to magic bytes (see [RAG Upload](#rag-upload--post-rag-dbupload)).
@@ -535,10 +535,11 @@ Ingest text directly, without wrapping it in a file — for callers that already
 | `stream` | `true` | `true` — stream tokens as `text/event-stream`; `false` — return one buffered JSON body |
 | `response_format` | `"text"` | `"text"` or `"json"` — instructs the LLM to return structured JSON |
 
-By default returns a **streaming response**. The first three lines are metadata headers, followed by the answer tokens:
+By default returns a **streaming response**. The first four lines are metadata headers, followed by the answer tokens:
 
 ```
 [SESSION_ID:a1b2c3d4e5f6...]
+[MODEL:smart]
 [SEARCH_QUERY:the reformulated standalone query]
 [SOURCES:filename1.pdf,filename2.pdf]
 The answer begins streaming here...
@@ -549,11 +550,20 @@ With `stream=false` the same metadata and answer arrive as one JSON body:
 ```json
 {
   "session_id": "a1b2c3d4e5f6...",
+  "model": "smart",
   "search_query": "the reformulated standalone query",
   "sources": ["filename1.pdf", "filename2.pdf"],
   "content": "The full answer..."
 }
 ```
+
+Writing your own decoder? Only the items inside `[SOURCES:...]` are
+percent-escaped (`%`→`%25`, `,`→`%2C`, `]`→`%5D`, newlines→`%0A`/`%0D`, reversed
+with `%25` last). `[SEARCH_QUERY:...]` and `[FILE:...]` carry their value raw, so
+a question like *what is [the pool] here?* puts a literal `]` mid-line — match a
+marker value greedily to the **last** `]` on the line, never the first.
+`tests/marker_vectors.json` is the golden contract every decoder is tested
+against; the SDKs vendor it verbatim.
 
 ---
 
@@ -641,8 +651,8 @@ Response:
 | `POST` | `/rag-db/{collection}/files/{filename}/questions` | Backfill or rebuild the hypothetical-question index for an already-stored document — `improved_search` is no longer locked in at upload time. Regenerates in the background and swaps out the old questions only once the new pass has results, so a failed pass never strips a working index (poll the `GET` for progress). `409` while a pass is already running, `400` when `HQ_ENABLED=false` |
 | `DELETE` | `/rag-db/delete/{collection}` | Delete an entire collection |
 | `DELETE` | `/rag-db/{collection}/files/{filename}` | Delete a single document from a collection. Deleting the **last** document also deletes the collection — a collection exists exactly as long as it holds chunks |
-| `GET` | `/rag-db/knowledge_base/{collection}/files/{filename}/summary` | 3-sentence summary of a document. Returns `{"filename", "content"}` by default; pass `?stream=true` for a token stream (`[FILE:...]` header, then `[PROGRESS:...]` lines, then tokens). Also accepts `?response_format=json` |
-| `POST` | `/rag-db/knowledge_base/compare` | Bullet-point diff between two documents (JSON body: `collection_name`, `file_1`, `file_2`, optional `stream` and `response_format`). Returns `{"file_1", "file_2", "content"}` by default; with `"stream": true`, streams `[PROGRESS:...]` lines then tokens |
+| `GET` | `/rag-db/knowledge_base/{collection}/files/{filename}/summary` | 3-sentence summary of a document. Returns `{"filename", "model", "content"}` by default; pass `?stream=true` for a token stream (`[FILE:...]` and `[MODEL:...]` headers, then `[PROGRESS:...]` lines, then tokens). Also accepts `?response_format=json` |
+| `POST` | `/rag-db/knowledge_base/compare` | Bullet-point diff between two documents (JSON body: `collection_name`, `file_1`, `file_2`, optional `stream` and `response_format`). Returns `{"file_1", "file_2", "model", "content"}` by default; with `"stream": true`, streams `[MODEL:...]` then `[PROGRESS:...]` lines then tokens |
 
 ---
 
